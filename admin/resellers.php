@@ -1,150 +1,131 @@
 <?php
-require_once __DIR__ . '/../config.php';
+require_once __DIR__ . '/../db.php';
+require_once __DIR__ . '/../auth.php';
+require_once __DIR__ . '/../helpers.php';
 require_admin();
+$pdo = db();
 
+/* Create / Update reseller */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = $_POST['action'] ?? 'save';
-    if ($action === 'save') {
-        $id      = isset($_POST['id']) ? (int)$_POST['id'] : 0;
-        $name    = trim($_POST['name'] ?? '');
-        $email   = trim($_POST['email'] ?? '');
-        $notes   = trim($_POST['notes'] ?? '');
-
-        if ($name === '') {
-            $_SESSION['flash_error'] = 'Name is required.';
-            redirect('resellers.php');
-        }
-
-        if ($id > 0) {
-            $stmt = $pdo->prepare('UPDATE resellers SET name=?, email=?, notes=? WHERE id=?');
-            $stmt->execute([$name, $email, $notes, $id]);
-            $_SESSION['flash_success'] = 'Reseller updated.';
-        } else {
-            $stmt = $pdo->prepare('INSERT INTO resellers (name, email, notes, created_at) VALUES (?,?,?,NOW())');
-            $stmt->execute([$name, $email, $notes]);
-            $_SESSION['flash_success'] = 'Reseller created.';
-        }
-    } elseif ($action === 'credits') {
-        $id     = isset($_POST['id']) ? (int)$_POST['id'] : 0;
-        $delta  = (int)($_POST['delta'] ?? 0);
-        $reason = trim($_POST['reason'] ?? '');
-        if ($id > 0 && $delta !== 0) {
-            $stmt = $pdo->prepare('UPDATE resellers SET credits = credits + ? WHERE id=?');
-            $stmt->execute([$delta, $id]);
-            $stmt2 = $pdo->prepare('INSERT INTO reseller_credits (reseller_id, delta, reason, created_at) VALUES (?,?,?,NOW())');
-            $stmt2->execute([$id, $delta, $reason]);
-            $_SESSION['flash_success'] = 'Credits updated.';
-        } else {
-            $_SESSION['flash_error'] = 'Reseller and non-zero credit delta required.';
-        }
+  $action = $_POST['action'] ?? '';
+  if ($action === 'create_reseller') {
+    $u = trim($_POST['username'] ?? '');
+    $p = $_POST['password'] ?? '';
+    $credits = (int)($_POST['credits'] ?? 0);
+    if ($u && $p) {
+      $hash = password_hash($p, PASSWORD_BCRYPT);
+      $stmt = $pdo->prepare("INSERT INTO resellers (username, password_hash, credits) VALUES (?,?,?)");
+      try {
+        $stmt->execute([$u, $hash, $credits]);
+        flash_set("Reseller created", "success");
+      } catch (Exception $e) {
+        flash_set("Create failed: ".$e->getMessage(), "error");
+      }
+    } else {
+      flash_set("Username and password required", "error");
     }
-    redirect('resellers.php');
+    header("Location: resellers.php"); exit;
+  }
+
+  if ($action === 'update_reseller') {
+    $id = (int)($_POST['id'] ?? 0);
+    $credits = (int)($_POST['credits'] ?? 0);
+    $status = ($_POST['status'] ?? 'active') === 'suspended' ? 'suspended' : 'active';
+    $pdo->prepare("UPDATE resellers SET credits=?, status=? WHERE id=?")
+        ->execute([$credits, $status, $id]);
+
+    $newpass = $_POST['password'] ?? '';
+    if ($newpass !== '') {
+      $hash = password_hash($newpass, PASSWORD_BCRYPT);
+      $pdo->prepare("UPDATE resellers SET password_hash=? WHERE id=?")->execute([$hash, $id]);
+    }
+    flash_set("Reseller updated", "success");
+    header("Location: resellers.php"); exit;
+  }
+
+  if ($action === 'delete_reseller') {
+    $id = (int)($_POST['id'] ?? 0);
+    $pdo->prepare("DELETE FROM resellers WHERE id=?")->execute([$id]);
+    $pdo->prepare("UPDATE users SET reseller_id=NULL WHERE reseller_id=?")->execute([$id]);
+    flash_set("Reseller deleted", "success");
+    header("Location: resellers.php"); exit;
+  }
 }
 
-if (isset($_GET['delete'])) {
-    $id = (int)$_GET['delete'];
-    $pdo->prepare('DELETE FROM resellers WHERE id=?')->execute([$id]);
-    $_SESSION['flash_success'] = 'Reseller deleted.';
-    redirect('resellers.php');
-}
+$resellers = $pdo->query("SELECT * FROM resellers ORDER BY id DESC")->fetchAll();
+$topbar = file_get_contents(__DIR__ . '/topbar.html');
+?><!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Resellers</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+<?= $topbar ?>
+<h1>Resellers</h1>
+<?php flash_show(); ?>
 
-$editReseller = null;
-if (isset($_GET['edit'])) {
-    $id = (int)$_GET['edit'];
-    $stmt = $pdo->prepare('SELECT * FROM resellers WHERE id=? LIMIT 1');
-    $stmt->execute([$id]);
-    $editReseller = $stmt->fetch();
-}
+<div class="card" style="margin:12px 0;">
+  <h2>Create Reseller</h2>
+  <form method="post">
+    <input type="hidden" name="action" value="create_reseller">
+    <div class="grid2">
+      <div>
+        <label>Username</label>
+        <input name="username" required>
+      </div>
+      <div>
+        <label>Temp Password</label>
+        <input name="password" required>
+      </div>
+    </div>
+    <label>Credits</label>
+    <input name="credits" type="number" min="0" value="0">
+    <button type="submit" style="margin-top:8px;">Create</button>
+  </form>
+</div>
 
-$resellers = $pdo->query('SELECT * FROM resellers ORDER BY id ASC')->fetchAll();
-
-require_once __DIR__ . '/header.php';
-?>
-
-<h2 class="page-title">
-    <span class="page-title-icon">🤝</span>
-    <span>Resellers</span>
-</h2>
-
-<h3><?php echo $editReseller ? 'Edit Reseller #' . (int)$editReseller['id'] : 'Add Reseller'; ?></h3>
-
-<form method="post">
-    <input type="hidden" name="action" value="save" />
-    <input type="hidden" name="id" value="<?php echo $editReseller ? (int)$editReseller['id'] : 0; ?>" />
-    <table>
-        <tr>
-            <td style="width:150px;">Name</td>
-            <td><input type="text" name="name" value="<?php echo h($editReseller['name'] ?? ''); ?>" /></td>
-        </tr>
-        <tr>
-            <td>Email</td>
-            <td><input type="email" name="email" value="<?php echo h($editReseller['email'] ?? ''); ?>" /></td>
-        </tr>
-        <tr>
-            <td>Notes</td>
-            <td><textarea name="notes" rows="3"><?php echo h($editReseller['notes'] ?? ''); ?></textarea></td>
-        </tr>
-        <tr>
-            <td></td>
-            <td><input type="submit" value="<?php echo $editReseller ? 'Update Reseller' : 'Create Reseller'; ?>" /></td>
-        </tr>
-    </table>
-</form>
-
-<h3>Adjust Credits</h3>
-<form method="post">
-    <input type="hidden" name="action" value="credits" />
-    <table>
-        <tr>
-            <td style="width:150px;">Reseller</td>
-            <td>
-                <select name="id">
-                    <option value="">-- Select --</option>
-                    <?php foreach ($resellers as $r): ?>
-                        <option value="<?php echo (int)$r['id']; ?>"><?php echo h($r['name']); ?> (Credits: <?php echo (int)$r['credits']; ?>)</option>
-                    <?php endforeach; ?>
-                </select>
-            </td>
-        </tr>
-        <tr>
-            <td>Delta (+/-)</td>
-            <td><input type="number" name="delta" value="0" /></td>
-        </tr>
-        <tr>
-            <td>Reason</td>
-            <td><input type="text" name="reason" /></td>
-        </tr>
-        <tr>
-            <td></td>
-            <td><input type="submit" value="Update Credits" /></td>
-        </tr>
-    </table>
-</form>
-
-<h3>Existing Resellers</h3>
-
-<table>
+<table class="table">
+  <thead>
     <tr>
-        <th>ID</th>
-        <th>Name</th>
-        <th>Email</th>
-        <th>Credits</th>
-        <th>Notes</th>
-        <th>Actions</th>
+      <th>ID</th><th>Username</th><th>Credits</th><th>Status</th><th>Actions</th>
     </tr>
-    <?php foreach ($resellers as $r): ?>
-        <tr>
-            <td><?php echo (int)$r['id']; ?></td>
-            <td><?php echo h($r['name']); ?></td>
-            <td><?php echo h($r['email']); ?></td>
-            <td><?php echo (int)$r['credits']; ?></td>
-            <td><?php echo nl2br(h($r['notes'])); ?></td>
-            <td>
-                <a href="resellers.php?edit=<?php echo (int)$r['id']; ?>">Edit</a> |
-                <a href="resellers.php?delete=<?php echo (int)$r['id']; ?>" onclick="return confirm('Delete this reseller?');">Delete</a>
-            </td>
-        </tr>
-    <?php endforeach; ?>
+  </thead>
+  <tbody>
+  <?php foreach ($resellers as $r): ?>
+    <tr>
+      <td><?= (int)$r['id'] ?></td>
+      <td><?= e($r['username']) ?></td>
+      <td><?= (int)$r['credits'] ?></td>
+      <td><?= e($r['status']) ?></td>
+      <td>
+        <details>
+          <summary>Edit</summary>
+          <form method="post" style="margin-top:6px;">
+            <input type="hidden" name="action" value="update_reseller">
+            <input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
+            <label>Credits</label>
+            <input name="credits" type="number" min="0" value="<?= (int)$r['credits'] ?>">
+            <label>Status</label>
+            <select name="status">
+              <option value="active" <?= $r['status']=='active'?'selected':'' ?>>active</option>
+              <option value="suspended" <?= $r['status']=='suspended'?'selected':'' ?>>suspended</option>
+            </select>
+            <label>New Password (optional)</label>
+            <input name="password" placeholder="leave blank to keep">
+            <button type="submit" style="margin-top:6px;">Save</button>
+          </form>
+          <form method="post" onsubmit="return confirm('Delete reseller? This will not delete their users.');" style="margin-top:6px;">
+            <input type="hidden" name="action" value="delete_reseller">
+            <input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
+            <button type="submit" class="danger">Delete</button>
+          </form>
+        </details>
+      </td>
+    </tr>
+  <?php endforeach; ?>
+  </tbody>
 </table>
 
-<?php require_once __DIR__ . '/footer.php'; ?>
+</div></body></html>

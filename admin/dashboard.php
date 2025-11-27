@@ -1,171 +1,171 @@
 <?php
-require_once __DIR__ . '/header.php';
+require_once __DIR__ . '/../db.php';
+require_once __DIR__ . '/../auth.php';
+require_once __DIR__ . '/../helpers.php';
+require_admin();
 
-// Basic counts
-$channelsCount  = (int)$pdo->query('SELECT COUNT(*) AS c FROM channels')->fetch()['c'];
-$usersCount     = (int)$pdo->query('SELECT COUNT(*) AS c FROM users')->fetch()['c'];
-$plansCount     = (int)$pdo->query('SELECT COUNT(*) AS c FROM plans')->fetch()['c'];
-$resellersCount = (int)$pdo->query('SELECT COUNT(*) AS c FROM resellers')->fetch()['c'];
+$pdo = db();
+$counts = [
+  'channels' => $pdo->query("SELECT COUNT(*) c FROM channels")->fetch()['c'],
+  'users'    => $pdo->query("SELECT COUNT(*) c FROM users")->fetch()['c'],
+  'plans'    => $pdo->query("SELECT COUNT(*) c FROM plans")->fetch()['c'],
+  'subs'     => $pdo->query("SELECT COUNT(*) c FROM subscriptions")->fetch()['c'],
+];
 
-// Stream status breakdown
-$onlineCount = (int)$pdo->query("SELECT COUNT(*) AS c FROM channels WHERE status = 'online'")->fetch()['c'];
-$offlineCount = (int)$pdo->query("SELECT COUNT(*) AS c FROM channels WHERE status LIKE 'http %' OR status LIKE 'error:%'")->fetch()['c'];
-$uncheckedCount = $channelsCount - $onlineCount - $offlineCount;
-if ($uncheckedCount < 0) {
-    $uncheckedCount = 0;
+$online = [
+  'streams' => (int)$pdo->query("SELECT COUNT(*) c FROM stream_sessions WHERE last_seen >= (NOW() - INTERVAL 5 MINUTE)")->fetch()['c'],
+  'users' => (int)$pdo->query("SELECT COUNT(DISTINCT user_id) c FROM stream_sessions WHERE last_seen >= (NOW() - INTERVAL 5 MINUTE)")->fetch()['c'],
+  'connections' => (int)$pdo->query("SELECT COUNT(DISTINCT ip) c FROM stream_sessions WHERE last_seen >= (NOW() - INTERVAL 5 MINUTE)")->fetch()['c'],
+  'servers' => 1,
+];
+
+$access_logs = $pdo->query("
+  SELECT ss.last_seen, ss.ip, u.username AS user_name, c.name AS channel_name
+  FROM stream_sessions ss
+  LEFT JOIN users u ON u.id = ss.user_id
+  LEFT JOIN channels c ON c.id = ss.channel_id
+  ORDER BY ss.last_seen DESC
+  LIMIT 10
+")->fetchAll();
+
+
+$topbar = file_get_contents(__DIR__ . '/topbar.html');
+$cfg = require __DIR__ . '/../config.php';
+$base_url = rtrim($cfg['base_url'], '/');
+
+// Derive site root for protected links (strip /public if present)
+$site_url = rtrim($base_url, '/');
+if (preg_match('~/public$~', $site_url)) {
+  $site_url = preg_replace('~/public$~', '', $site_url);
 }
 
-$onlinePercent = $channelsCount > 0 ? round(($onlineCount / $channelsCount) * 100) : 0;
-
-// Recent checks (last 10 by last_check)
-$recentChecksStmt = $pdo->query("SELECT * FROM channels WHERE last_check IS NOT NULL ORDER BY last_check DESC LIMIT 10");
-$recentChecks = $recentChecksStmt->fetchAll();
 ?>
-<h1 class="page-title">
-    <span class="page-title-icon">📊</span>
-    <span>Dashboard</span>
-</h1>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Admin Panel</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+<?= $topbar ?>
+<h1>IPTV Admin Panel</h1>
+<p class="muted">Logged in as <?=e($_SESSION['admin_username'])?></p>
+<?php flash_show(); ?>
 
-<div class="stats-grid">
-    <div class="stat-card">
-        <div class="stat-main">
-            <div class="stat-label">Total Channels</div>
-            <div class="stat-value"><?php echo $channelsCount; ?></div>
-        </div>
-        <div class="stat-icon">📺</div>
+
+<div class="card" style="margin:14px 0;">
+  <h2>Playlist Link Output Mode</h2>
+  <div class="row">
+    <div>
+      <label for="linkMode">Link mode</label>
+      <select id="linkMode">
+        <option value="auto">Auto (current behavior)</option>
+        <option value="direct_protected">Direct Link with Protection</option>
+        <option value="standard_protected">Standard Link with Protection</option>
+      </select>
     </div>
-    <div class="stat-card">
-        <div class="stat-main">
-            <div class="stat-label">Online Streams</div>
-            <div class="stat-value" style="color:#16a34a;"><?php echo $onlineCount; ?></div>
-        </div>
-        <div class="stat-icon">✅</div>
+    <div>
+      <label for="m3uUrl">Example M3U URL</label>
+      <input id="m3uUrl" type="text" readonly>
     </div>
-    <div class="stat-card">
-        <div class="stat-main">
-            <div class="stat-label">Active Users</div>
-            <div class="stat-value"><?php
-                $activeUsers = (int)$pdo->query("SELECT COUNT(*) AS c FROM users WHERE status='active'")->fetch()['c'];
-                echo $activeUsers;
-            ?></div>
-        </div>
-        <div class="stat-icon">👥</div>
+    <div>
+      <label for="xmlUrl">Example XMLTV URL</label>
+      <input id="xmlUrl" type="text" readonly>
     </div>
-    <div class="stat-card">
-        <div class="stat-main">
-            <div class="stat-label">Active Resellers</div>
-            <div class="stat-value"><?php echo $resellersCount; ?></div>
-        </div>
-        <div class="stat-icon">🧑‍💼</div>
+  </div>
+  <p class="muted" style="margin-top:8px;">
+    Protected modes always hide upstream stream URLs and return links from <b><?=e($site_url)?></b>.
+  </p>
+</div>
+
+<script>
+(function(){
+  const baseUrl = <?= json_encode($base_url) ?>;
+  const siteUrl = <?= json_encode($site_url) ?>;
+  const modeSel = document.getElementById('linkMode');
+  const m3u = document.getElementById('m3uUrl');
+  const xml = document.getElementById('xmlUrl');
+
+  function update(){
+    const mode = modeSel.value;
+    const linkParam = (mode === 'auto') ? '' : '&link=' + encodeURIComponent(mode);
+    m3u.value = baseUrl + '/get.php?username=YOURUSER&password=YOURPASS&type=m3u' + linkParam;
+    xml.value = baseUrl + '/xmltv.php?username=YOURUSER&password=YOURPASS';
+  }
+  modeSel.addEventListener('change', update);
+  update();
+})();
+</script>
+
+
+
+<div class="stat-tiles xtream-tiles">
+  <div class="xtile xtile-green">
+    <div class="xtile-left">
+      <div class="xtile-value"><?= (int)$online['streams'] ?> / <?= (int)$counts['channels'] ?></div>
+      <div class="xtile-label">Online Streams</div>
+    </div>
+    <div class="xtile-right">
+      <div class="xtile-circle"><span>▶️</span></div>
     </div>
 </div>
 
-<div class="panel-grid">
-    <div class="panel">
-        <div class="panel-header">
-            <span class="panel-header-icon">📡</span>
-            <span>Stream Status Overview</span>
-        </div>
-        <div class="panel-body">
-            <table>
-                <tr>
-                    <th>Status</th>
-                    <th>Count</th>
-                    <th>Percent</th>
-                </tr>
-                <tr>
-                    <td>Online</td>
-                    <td style="color:#16a34a;"><?php echo $onlineCount; ?></td>
-                    <td style="color:#16a34a;"><?php echo $onlinePercent; ?>%</td>
-                </tr>
-                <tr>
-                    <td>Offline</td>
-                    <td style="color:#dc2626;"><?php echo $offlineCount; ?></td>
-                    <td><?php
-                        $offlinePercent = $channelsCount > 0 ? round(($offlineCount / $channelsCount) * 100) : 0;
-                        echo $offlinePercent . '%';
-                    ?></td>
-                </tr>
-                <tr>
-                    <td>Unchecked</td>
-                    <td><?php echo $uncheckedCount; ?></td>
-                    <td><?php
-                        $uncheckedPercent = $channelsCount > 0 ? 100 - $onlinePercent - ($channelsCount > 0 ? round(($offlineCount / $channelsCount) * 100) : 0) : 0;
-                        if ($uncheckedPercent < 0) { $uncheckedPercent = 0; }
-                        echo $uncheckedPercent . '%';
-                    ?></td>
-                </tr>
-            </table>
-        </div>
+  <div class="xtile xtile-blue">
+    <div class="xtile-left">
+      <div class="xtile-value"><?= (int)$online['users'] ?> / <?= (int)$counts['users'] ?></div>
+      <div class="xtile-label">Online Users</div>
     </div>
-
-    <div class="panel">
-        <div class="panel-header">
-            <span class="panel-header-icon">ℹ️</span>
-            <span>Quick Stats</span>
-        </div>
-        <div class="panel-body">
-            <table>
-                <tr>
-                    <th>Metric</th>
-                    <th>Value</th>
-                </tr>
-                <tr>
-                    <td>Total Channels</td>
-                    <td><?php echo $channelsCount; ?></td>
-                </tr>
-                <tr>
-                    <td>Total Users</td>
-                    <td><?php echo $usersCount; ?></td>
-                </tr>
-                <tr>
-                    <td>Active Users</td>
-                    <td><?php echo $activeUsers; ?></td>
-                </tr>
-                <tr>
-                    <td>Total Resellers</td>
-                    <td><?php echo $resellersCount; ?></td>
-                </tr>
-                <tr>
-                    <td>Online Streams</td>
-                    <td><?php echo $onlineCount; ?></td>
-                </tr>
-                <tr>
-                    <td>Offline Streams</td>
-                    <td><?php echo $offlineCount; ?></td>
-                </tr>
-            </table>
-        </div>
+    <div class="xtile-right">
+      <div class="xtile-circle"><span>👥</span></div>
     </div>
 </div>
 
-<div class="panel">
-    <div class="panel-header">
-        <span class="panel-header-icon">⏱️</span>
-        <span>Recent Stream Checks</span>
+  <div class="xtile xtile-yellow">
+    <div class="xtile-left">
+      <div class="xtile-value"><?= (int)$online['connections'] ?> / ∞</div>
+      <div class="xtile-label">Online Connections</div>
     </div>
-    <div class="panel-body">
-        <?php if (!$recentChecks): ?>
-            <p>No stream checks performed yet.</p>
-        <?php else: ?>
-            <table>
-                <tr>
-                    <th>ID</th>
-                    <th>Channel</th>
-                    <th>Status</th>
-                    <th>Last Check</th>
-                </tr>
-                <?php foreach ($recentChecks as $ch): ?>
-                    <tr>
-                        <td><?php echo (int)$ch['id']; ?></td>
-                        <td><?php echo h($ch['name']); ?></td>
-                        <td><?php echo h($ch['status']); ?></td>
-                        <td><?php echo h($ch['last_check']); ?></td>
-                    </tr>
-                <?php endforeach; ?>
-            </table>
-        <?php endif; ?>
+    <div class="xtile-right">
+      <div class="xtile-circle"><span>⚡</span></div>
     </div>
 </div>
 
-<?php require_once __DIR__ . '/footer.php'; ?>
+  <div class="xtile xtile-gray">
+    <div class="xtile-left">
+      <div class="xtile-value"><?= (int)$online['servers'] ?> / <?= (int)$online['servers'] ?></div>
+      <div class="xtile-label">Online Servers</div>
+    </div>
+    <div class="xtile-right">
+      <div class="xtile-circle"><span>🗄️</span></div>
+    </div>
+</div>
+</div>
+
+<div class="card" style="margin-top:14px;">
+
+  <h2 style="margin-bottom:8px;">Recent Access Logs</h2>
+  <div style="overflow:auto;">
+    <table class="table">
+      <tr>
+        <th>Time</th><th>User</th><th>Channel</th><th>IP</th>
+      </tr>
+      <?php foreach($access_logs as $log): ?>
+      <tr>
+        <td><?= e($log['last_seen']) ?></td>
+        <td><?= e($log['user_name'] ?? '-') ?></td>
+        <td><?= e($log['channel_name'] ?? '-') ?></td>
+        <td><?= e($log['ip']) ?></td>
+      </tr>
+      <?php endforeach; ?>
+      <?php if(empty($access_logs)): ?>
+      <tr><td colspan="4" style="text-align:center; opacity:.7;">No recent sessions</td></tr>
+      <?php endif; ?>
+    </table>
+  </div>
+</div>
+</div><!-- container -->
+</main>
+</div><!-- app -->
+</body>
+</html>

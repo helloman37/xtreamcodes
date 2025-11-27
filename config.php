@@ -1,57 +1,37 @@
 <?php
-// Basic configuration for IPTV panel
+// config.php
+// EDIT THESE to your real cPanel creds + domain.
+// PayPal REST API (storefront)
+if (!defined('PAYPAL_CLIENT_ID')) define('PAYPAL_CLIENT_ID', '');
+if (!defined('PAYPAL_SECRET')) define('PAYPAL_SECRET', '');
+if (!defined('PAYPAL_SANDBOX')) define('PAYPAL_SANDBOX', true);
+// CashApp storefront (owner cashtag)
+if (!defined('CASHAPP_CASHTAG')) define('CASHAPP_CASHTAG', '$');
 
-define('DB_HOST', 'localhost');
-define('DB_NAME', 'iptv_panel');
-define('DB_USER', 'root');
-define('DB_PASS', 'password');
+return [
+  'db' => [
+    'host' => 'localhost',
+    'name' => '',
+    'user' => '',
+    'pass' => '',
+    'charset' => 'utf8mb4'
+  ],
 
-// Create PDO connection (PHP 7.4 compatible)
-try {
-    $pdo = new PDO(
-        'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4',
-        DB_USER,
-        DB_PASS,
-        [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]
-    );
-} catch (PDOException $e) {
-    die('Database connection failed: ' . $e->getMessage());
-}
+  'session_name' => 'iptv_admin_session',
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+  // your real domain root (NO trailing slash)
+  'base_url' => 'http://',
 
-$config = [
-    'admin_session_key' => 'iptv_admin_logged_in',
-    'admin_username_key' => 'iptv_admin_username',
+  // CHANGE THIS to a long random string
+  'secret_key' => 'h!}[.;RZP,4|Y(wNfdtb6fVx*.W[I[g2XKek8hu>BRNNr06JTlaNk=@YL,4~#f)I',
+
+  // token expiry in seconds (1 hour default)
+  'token_ttl' => 3600,
+
+  // device/connection window in seconds
+  'device_window' => 120,
+
+  // anti-restream: max unique IPs in window
+  'max_ip_changes' => 3,
+  'max_ip_window'  => 600
 ];
-
-function is_admin_logged_in(): bool
-{
-    global $config;
-    return !empty($_SESSION[$config['admin_session_key']]);
-}
-
-function require_admin(): void
-{
-    if (!is_admin_logged_in()) {
-        header('Location: login.php');
-        exit;
-    }
-}
-
-function redirect(string $url): void
-{
-    header('Location: ' . $url);
-    exit;
-}
-
-function h(?string $str): string
-{
-    return htmlspecialchars((string)$str, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-}

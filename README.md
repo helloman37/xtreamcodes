@@ -1,10 +1,13 @@
-# Simple IPTV Admin Panel (PHP 7.4)  
+# Simple IPTV Admin Panel (PHP 7.4–8)
+(Keep in mind, player_api is screwed. The app I mention? Works. Will be released once finished. ENJOY!!!!)
 
-> ⚠️ Work in progress – not production-ready yet. Use as a base to build your own panel.
+> ⚠️ Work in progress – not production-ready yet. Use this as a base to build your own panel.
 
-This project is a lightweight IPTV management panel written in **pure PHP 7.4** + **MySQL**, designed to manage streams you legally obtain (e.g. Pluto TV, etc.).  
+This project is a lightweight IPTV management panel written in pure PHP 7.4 with MySQL, designed to manage streams you legally obtain (for example Pluto TV and other free OTT sources).
 
-Everything is plain PHP – no frameworks, no composer, easy to drop on a cheap shared host or XAMPP stack.
+Everything is plain PHP: no frameworks, no Composer, easy to drop on a cheap shared host, VPS, or a local XAMPP stack.
+
+With the Version 7 re-release, an Android TV / mobile app is also being built to work alongside this panel. The idea is that the panel does all the admin work (channels, categories, EPG, users, resellers) while the Android client consumes the data cleanly for end users.
 
 ---
 
@@ -12,19 +15,24 @@ Everything is plain PHP – no frameworks, no composer, easy to drop on a cheap 
 
 ### 🔐 Admin Area (`/admin`)
 
-- Login / logout system for admins  
-- Clean dashboard with card-style stats and panels:
-  - Total channels
-  - Online streams
-  - Active users
-  - Active resellers
-  - Stream status overview (online / offline / unchecked + percentages)
-  - Quick stats table
-  - Recent stream checks list
+Login / logout system for admins.
 
-> Default admin (created by `db.sql`):  
-> **user:** `admin` / **pass:** `admin123`  
-> Change this immediately.
+Dashboard with card-style stats and panels:
+
+- Total channels  
+- Online streams  
+- Active users  
+- Active resellers  
+- Stream status overview (online / offline / unchecked, with simple percentages)  
+- Quick stats table  
+- Recent stream checks list  
+
+Default admin (created by `db.sql`):
+
+- user: `admin`  
+- pass: `admin123`  
+
+Change this immediately after installing.
 
 ---
 
@@ -32,21 +40,28 @@ Everything is plain PHP – no frameworks, no composer, easy to drop on a cheap 
 
 **File:** `admin/channels.php`
 
-- Add / edit / delete channels
-- Assign channels to categories
-- Fields:
-  - Name
-  - Category
-  - Stream URL
-  - Logo URL
-  - EPG ID (`tvg-id` from M3U)
-  - Active toggle
-- Shows:
-  - Status (`online`, HTTP errors, etc.)
-  - Last check time
-- Category manager (`admin/channels_categories.php`):
-  - Add categories
-  - Delete categories (channels are automatically set to `NULL` category)
+Add, edit, and delete channels.  
+Assign channels to categories.
+
+Fields per channel:
+
+- Name  
+- Category  
+- Stream URL  
+- Logo URL  
+- EPG ID (tvg-id from M3U)  
+- Active toggle  
+
+Each channel row shows the last known status (online, HTTP error codes, or other error text) and the last check time.
+
+Category manager lives in `admin/channels_categories.php`.
+
+You can:
+
+- Add new categories  
+- Delete existing categories  
+
+When a category is deleted, channels in that category are not removed; their category is set to `NULL` so they stay in the system.
 
 ---
 
@@ -54,25 +69,20 @@ Everything is plain PHP – no frameworks, no composer, easy to drop on a cheap 
 
 **File:** `admin/import_m3u.php`
 
-Supports importing channels from:
+Supports importing channels from either an uploaded M3U file or a remote M3U URL.
 
-- **Uploaded M3U file**, or  
-- **Remote M3U URL**
+The M3U parser understands standard `#EXTINF` lines and extracts:
 
-The parser understands:
+- `tvg-id="..."` → stored as `epg_id`  
+- `tvg-logo="..."` → stored as `logo_url`  
+- `group-title="..."` → mapped to channel categories (auto-creates categories if needed)  
+- Channel name (the text after the comma)  
+- The next line after `#EXTINF` as the stream URL  
 
-- `#EXTINF` lines
-- `tvg-id="..."` → stored as `epg_id`
-- `tvg-logo="..."` → stored as `logo_url`
-- `group-title="..."` → mapped to **categories** (auto-creates categories)
-- Channel name (after the comma)
-- Next line as stream URL
+The importer:
 
-Other details:
-
-- Skips empty/broken entries
-- Avoids exact duplicates (same name + same URL)
-- Creates categories if `group-title` doesn’t exist yet
+- Skips empty or obviously broken entries  
+- Avoids exact duplicates (same name and same URL)  
 
 ---
 
@@ -80,12 +90,16 @@ Other details:
 
 **File:** `admin/stream_checker.php`
 
-- Individual checker for each channel
-- Uses cURL (HEAD request) to test the stream URL
-- Stores:
-  - `status` (e.g. `online`, `http 404`, `error: ...`)
-  - `last_check` (timestamp)
-- Dashboard aggregates these into **online / offline / unchecked** stats
+Provides an individual stream checker for each channel.
+
+Uses cURL with a HEAD request to quickly test the stream URL.
+
+Stores:
+
+- `status` (for example `online`, `http 404`, `error: timeout`, etc.)  
+- `last_check` (timestamp of the last probe)  
+
+The dashboard aggregates this into simple online / offline / unchecked stats for a quick health overview.
 
 ---
 
@@ -93,7 +107,20 @@ Other details:
 
 **File:** `admin/epg.php`
 
-- Stores a **global remote EPG URL** (XMLTV style), e.g.:
+Stores a single global remote EPG URL in XMLTV format. Example:
 
-  ```text
-  http://url/xmltv.php?username=USER&password=PASS
+```text
+http://url/xmltv.php?username=USER&password=PASS
+```
+
+This global EPG link is intended to be shared between the web panel and the Android app so that both can read the same guide data.
+
+Future versions are planned to expose EPG JSON endpoints for the Android client, allowing the app to pull guide data directly from this panel instead of hard-coding XMLTV URLs.
+
+---
+
+## Notes
+
+This codebase is meant as a starting point for your own IPTV tools. You are responsible for the content you load into it. Only use streams and EPG sources that you have the legal right to use.
+
+The Android app that will accompany this panel is still in development. API endpoints, authentication flows, and EPG output formats may change as the app evolves.

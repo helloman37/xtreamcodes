@@ -1,0 +1,14 @@
+RewriteEngine On
+
+# HLS playlist proxy
+RewriteRule ^live/([^/]+)/([^/]+)/([0-9]+)\.m3u8$ ../stream/index.php?u=$1&p=$2&id=$3 [L,QSA]
+
+# Xtream-style TS URL (Smarters uses this)
+RewriteRule ^live/([^/]+)/([^/]+)/([0-9]+)\.ts$ ../stream/index.php?u=$1&p=$2&id=$3 [L,QSA]
+
+# HLS segments proxy
+RewriteRule ^seg/([^/]+)/([^/]+)/([0-9]+)$ ../stream/segment.php?u=$1&p=$2&id=$3 [L,QSA]
+
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [L]
