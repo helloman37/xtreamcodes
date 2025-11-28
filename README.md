@@ -1,3 +1,5 @@
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-%24tysonworlds-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://cash.app/$tysonworlds)
+
 # Simple IPTV Admin Panel (PHP 7.4–8)
 (Keep in mind, player_api is screwed. The app I mention? Works. Will be released once finished. ENJOY!!!!)
 
