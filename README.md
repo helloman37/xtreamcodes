@@ -3,6 +3,11 @@
 # Simple IPTV Admin Panel (PHP 7.4–8)
 (Keep in mind, player_api is screwed. The app I mention? Works. Will be released once finished. ENJOY!!!!)
 
+About the app at this point: It works on Android TV, and Android phones. I am implimenting some features to make it work great before releasing it here. The full source? hmmm I do not know if I will release that, maybe just a apk. 
+
+I know the answer already, should I release the full source code here? Or... maybe Codecanyon that thing?
+
+
 > ⚠️ Work in progress – not production-ready yet. Use this as a base to build your own panel.
 
 This project is a lightweight IPTV management panel written in pure PHP 7.4 with MySQL, designed to manage streams you legally obtain (for example Pluto TV and other free OTT sources).
