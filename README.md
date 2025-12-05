@@ -1,6 +1,6 @@
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-%24tysonworlds-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://cash.app/$tysonworlds)
 
-The app is coming along great. Movies and TV shows now load automatically, so there's no need to add them manually in the panel. I've put a lot of time into this project, so I may not release full source code publicly, but if you'd like a leg up and want to support the work, you can use the Buy Me a Coffee button above to gain access to the archive password.
+The app is coming along great. Movies and TV shows now load automatically, so there's no need to add them manually in the panel. I've put a lot of time into this project, so I may not release full source code publicly, but if you'd like a leg up and want to support the work, you can use the Buy Me a Coffee button above.
 
 # Simple IPTV Admin Panel (PHP 7.4–8)
 (Keep in mind, player_api is screwed. The app I mention? Works. Will be released once finished. ENJOY!!!!)
