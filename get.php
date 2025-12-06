@@ -10,14 +10,15 @@ $site_url = rtrim($base_url, '/');
 if (preg_match('~/public$~', $site_url)) {
   $site_url = preg_replace('~/public$~', '', $site_url);
 }
+
 $ttl      = (int)($config['token_ttl'] ?? 3600);
 
 $username = trim($_GET['username'] ?? '');
 $password = $_GET['password'] ?? '';
 $type     = strtolower($_GET['type'] ?? 'm3u');
 
-
 $link_type = strtolower($_GET['link'] ?? 'auto'); // auto|direct_protected|standard_protected
+
 if ($username === '' || $password === '') {
   http_response_code(400);
   echo "Missing username or password";
@@ -30,8 +31,11 @@ $pdo = db();
 $st = $pdo->prepare("SELECT * FROM users WHERE username=? AND status='active' LIMIT 1");
 $st->execute([$username]);
 $user = $st->fetch();
+
 if (!$user || !password_verify($password, $user['password_hash'])) {
-  http_response_code(401); echo "Invalid credentials"; exit;
+  http_response_code(401);
+  echo "Invalid credentials";
+  exit;
 }
 
 /* subscription+plan */
@@ -44,7 +48,44 @@ $st = $pdo->prepare("
 ");
 $st->execute([$user['id']]);
 $sub = $st->fetch();
-if (!$sub) { http_response_code(403); echo "No active subscription"; exit; }
+
+if (!$sub) {
+  http_response_code(403);
+  echo "No active subscription";
+  exit;
+}
+
+/*
+  App-config support:
+  The app can call:
+    get.php?username=...&password=...&type=config
+
+  Values are pulled from:
+    - optional per-user fields if you later add them to DB:
+        users.tmdb_api_key, users.app_logo_url, users.tmdb_region
+    - otherwise from config.php:
+        'tmdb_api_key', 'app_logo_url', 'tmdb_region'
+*/
+
+$user_tmdb = $user['tmdb_api_key'] ?? '';
+$user_logo = $user['app_logo_url'] ?? '';
+$user_region = $user['tmdb_region'] ?? '';
+
+$tmdb_api_key = $user_tmdb ?: ($config['tmdb_api_key'] ?? '');
+$app_logo_url = $user_logo ?: ($config['app_logo_url'] ?? '');
+$tmdb_region  = $user_region ?: ($config['tmdb_region'] ?? 'US');
+
+if ($type === 'config') {
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode([
+    'tmdb_api_key' => $tmdb_api_key,
+    'app_logo_url' => $app_logo_url,
+    'tmdb_region'  => $tmdb_region,
+    'site_url'     => $site_url,
+    'token_ttl'    => $ttl
+  ], JSON_UNESCAPED_SLASHES);
+  exit;
+}
 
 $adult_ok = !empty($user["allow_adult"]);
 
@@ -71,6 +112,7 @@ foreach ($channels as $c) {
 
   echo '#EXTINF:-1'.$tvgId.$tvgNm.$logo.$group.','.$c['name']."
 ";
+
   // Decide extension: per-channel override or detect
   $ext = $c['container_ext'];
   if (!$ext) {
@@ -87,9 +129,11 @@ foreach ($channels as $c) {
   if ($link_type === 'direct_protected') {
     $hidden = $site_url."/stream/index.php?u=".rawurlencode($username)."&p=".rawurlencode($password)."&id=".$c['id'];
     $hidden .= "&exp=".$exp."&token=".$token;
+
   } elseif ($link_type === 'standard_protected') {
     $hidden = $site_url."/live/".rawurlencode($username)."/".rawurlencode($password)."/".$c['id'].".".$ext;
     $hidden .= "?exp=".$exp."&token=".$token;
+
   } else { // auto
     if ((int)$c['direct_play'] === 1) {
       echo $c['stream_url']."
