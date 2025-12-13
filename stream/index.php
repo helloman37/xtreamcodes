@@ -40,6 +40,8 @@ ensure_categories($pdo);
 $ip = get_client_ip();
 $ua = substr($_SERVER['HTTP_USER_AGENT'] ?? 'unknown', 0, 250);
 $device_fp = get_device_fingerprint();
+$device_id_raw = trim($_GET['device_id'] ?? ($_SERVER['HTTP_X_DEVICE_ID'] ?? ''));
+$device_id_raw = substr($device_id_raw, 0, 128);
 if ($device_fp==='' && strict_device_id_enabled()) {
   telemetry_reason('device_id_required');
   http_response_code(403);
@@ -119,19 +121,6 @@ try {
   // ignore
 }
 
-// Hard max devices (based on plan)
-if ($max_devices > 0 && $device_fp !== '') {
-  $st = $pdo->prepare("SELECT COUNT(*) c FROM user_devices WHERE user_id=?");
-  $st->execute([(int)$user['id']]);
-  $dev_count = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
-  if ($dev_count > $max_devices) {
-    audit_log('max_devices', (int)$user['id'], ['count'=>$dev_count,'max'=>$max_devices]);
-    telemetry_reason('max_devices', ['count'=>$dev_count,'max'=>$max_devices]);
-    http_response_code(403);
-    exit('max_devices_reached');
-  }
-}
-
 /* package/bouquet enforcement (live + VOD + Series) */
 $pkg_ids = user_package_ids($pdo, (int)$user['id']);
 
@@ -181,42 +170,125 @@ if ($pkg_ids) {
 /* cleanup old sessions */
 $pdo->exec("DELETE FROM stream_sessions WHERE last_seen < (NOW() - INTERVAL 2 DAY)");
 
-/* session tracking + token rotation */
-$session_token = random_hex_token(16);
+/* ---------- active device/stream enforcement ---------- */
+$dev_win  = (int)($config['device_window'] ?? 120);
+
+// Find an existing active session for *this* device (channel switch should reuse it)
+$session_id = 0;
 try {
-  $pdo->prepare("
-    INSERT INTO stream_sessions (user_id, channel_id, item_id, stream_type, ip, user_agent, device_fp, session_token, last_seen)
-    VALUES (?,?,?,?,?,?,?,?, NOW())
-  ")->execute([(int)$user['id'], ($type==='live' ? $id : null), $id, $type, $ip, $ua, $device_fp, $session_token]);
+  if ($device_fp !== '') {
+    $st = $pdo->prepare("
+      SELECT id FROM stream_sessions
+      WHERE user_id=?
+        AND device_fp=?
+        AND (killed_at IS NULL OR killed_at='0000-00-00 00:00:00')
+        AND last_seen > (NOW() - INTERVAL ? SECOND)
+      ORDER BY last_seen DESC LIMIT 1
+    ");
+    $st->execute([(int)$user['id'], $device_fp, $dev_win]);
+  } else {
+    $st = $pdo->prepare("
+      SELECT id FROM stream_sessions
+      WHERE user_id=?
+        AND ip=?
+        AND user_agent=?
+        AND (killed_at IS NULL OR killed_at='0000-00-00 00:00:00')
+        AND last_seen > (NOW() - INTERVAL ? SECOND)
+      ORDER BY last_seen DESC LIMIT 1
+    ");
+    $st->execute([(int)$user['id'], $ip, $ua, $dev_win]);
+  }
+  $session_id = (int)($st->fetch(PDO::FETCH_ASSOC)['id'] ?? 0);
 } catch (Throwable $e) {
-  // Backward compatible insert
-  $pdo->prepare("
-    INSERT INTO stream_sessions (user_id, channel_id, ip, user_agent, device_fp, last_seen)
-    VALUES (?,?,?,?,?, NOW())
-  ")->execute([(int)$user['id'], $id, $ip, $ua, $device_fp]);
+  $session_id = 0;
 }
 
-/* max connections (hard) */
-$dev_win  = (int)($config['device_window'] ?? 120);
+$need_stream = $session_id ? 0 : 1;
+$need_device = $session_id ? 0 : 1;
+
+// Count active streams (each active session counts as 1 stream)
 $st = $pdo->prepare("
-  SELECT COUNT(*) AS c FROM (
-    SELECT DISTINCT IFNULL(device_fp,''), ip, user_agent
-    FROM stream_sessions
-    WHERE user_id=?
-      AND (killed_at IS NULL OR killed_at='0000-00-00 00:00:00')
-      AND last_seen > (NOW() - INTERVAL ? SECOND)
-  ) x
+  SELECT COUNT(*) AS c
+  FROM stream_sessions
+  WHERE user_id=?
+    AND (killed_at IS NULL OR killed_at='0000-00-00 00:00:00')
+    AND last_seen > (NOW() - INTERVAL ? SECOND)
+");
+$st->execute([(int)$user['id'], $dev_win]);
+$active_streams = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
+
+// Count active devices (stable: device_fp when present; otherwise ip+ua)
+$st = $pdo->prepare("
+  SELECT COUNT(DISTINCT
+    CASE
+      WHEN device_fp IS NOT NULL AND device_fp<>'' THEN device_fp
+      ELSE CONCAT('ip:',ip,'|ua:',user_agent)
+    END
+  ) AS c
+  FROM stream_sessions
+  WHERE user_id=?
+    AND (killed_at IS NULL OR killed_at='0000-00-00 00:00:00')
+    AND last_seen > (NOW() - INTERVAL ? SECOND)
 ");
 $st->execute([(int)$user['id'], $dev_win]);
 $active_devices = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
 
-if ($active_devices > $max_streams) {
-  audit_log('max_connections', (int)$user['id'], ['channel_id'=>$id,'active'=>$active_devices,'max'=>$max_streams]);
-  telemetry_reason('max_connections', ['active'=>$active_devices,'max'=>$max_streams,'id'=>$id]);
+// Enforce plan max_devices (active devices window)
+if ($max_devices > 0 && ($active_devices + $need_device) > $max_devices) {
+  audit_log('max_devices', (int)$user['id'], ['active'=>$active_devices,'max'=>$max_devices]);
+  telemetry_reason('max_devices', ['active'=>$active_devices,'max'=>$max_devices]);
+  http_response_code(403);
+  exit('max_devices_reached');
+}
+
+// Enforce plan max_streams (active streams window)
+if ($max_streams > 0 && ($active_streams + $need_stream) > $max_streams) {
+  audit_log('max_connections', (int)$user['id'], ['channel_id'=>$id,'active'=>$active_streams,'max'=>$max_streams]);
+  telemetry_reason('max_connections', ['active'=>$active_streams,'max'=>$max_streams,'id'=>$id]);
   http_response_code(429);
   header("Content-Type: application/json; charset=utf-8");
-  echo json_encode(["error"=>"max_connections_reached","active"=>$active_devices,"max"=>$max_streams]);
+  echo json_encode(["error"=>"max_connections_reached","active"=>$active_streams,"max"=>$max_streams]);
   exit;
+}
+
+/* ---------- session tracking + token rotation ---------- */
+$session_token = random_hex_token(16);
+
+if ($session_id > 0) {
+  // Channel switch / refresh: reuse the same active session slot
+  try {
+    $pdo->prepare("
+      UPDATE stream_sessions
+      SET channel_id=?,
+          item_id=?,
+          stream_type=?,
+          ip=?,
+          user_agent=?,
+          device_fp=?,
+          session_token=?,
+          killed_at=NULL,
+          last_seen=NOW()
+      WHERE id=?
+    ")->execute([$id, $id, $type, $ip, $ua, $device_fp, $session_token, $session_id]);
+  } catch (Throwable $e) {
+    // Backward compatible update
+    $pdo->prepare("UPDATE stream_sessions SET channel_id=?, ip=?, user_agent=?, device_fp=?, last_seen=NOW() WHERE id=?")
+        ->execute([$id, $ip, $ua, $device_fp, $session_id]);
+  }
+} else {
+  // New stream slot
+  try {
+    $pdo->prepare("
+      INSERT INTO stream_sessions (user_id, channel_id, item_id, stream_type, ip, user_agent, device_fp, session_token, last_seen)
+      VALUES (?,?,?,?,?,?,?,?, NOW())
+    ")->execute([(int)$user['id'], $id, $id, $type, $ip, $ua, $device_fp, $session_token]);
+  } catch (Throwable $e) {
+    // Backward compatible insert
+    $pdo->prepare("
+      INSERT INTO stream_sessions (user_id, channel_id, ip, user_agent, device_fp, last_seen)
+      VALUES (?,?,?,?,?, NOW())
+    ")->execute([(int)$user['id'], $id, $ip, $ua, $device_fp]);
+  }
 }
 
 /* anti-restream: too many IP swaps in window */
@@ -400,6 +472,13 @@ if ($token_ok) {
 } else {
   $seg_base = $base_url . "/seg/" . rawurlencode($u) . "/" . rawurlencode($p) . "/" . $id;
   $seg_tail = "type=" . rawurlencode($type) . "&st=" . rawurlencode($session_token);
+}
+
+if ($device_id_raw !== '') {
+  $seg_tail .= "&device_id=" . rawurlencode($device_id_raw);
+}
+if ($device_fp !== '') {
+  $seg_tail .= "&dfp=" . rawurlencode($device_fp);
 }
 
 $out = [];

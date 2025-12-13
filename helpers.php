@@ -171,6 +171,12 @@ function get_device_fingerprint(): string {
     return '';
   }
 
+  // If the stream proxy passed a fingerprint forward, use it (stabilizes device identity)
+  $dfp = trim($_GET['dfp'] ?? '');
+  if ($dfp !== '' && preg_match('/^[a-f0-9]{32}$/i', $dfp)) {
+    return strtolower($dfp);
+  }
+
   $ua = $_SERVER['HTTP_USER_AGENT'] ?? 'unknown';
   $lang = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';
   return substr(hash('sha256', $ua.'|'.$lang), 0, 32);
