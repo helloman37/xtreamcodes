@@ -2,11 +2,11 @@
 
 # Simple IPTV Admin Panel (PHP 7.4–8.x)
 
-> ⚠️ Work in progress – use at your own risk. This is a dev-friendly base, not a turnkey “production panel”.
+> ⚠️ Work in progress – dev-friendly base, not a turnkey production panel.
 
-Pure PHP + MySQL IPTV panel + a companion Android app. No frameworks. No Composer. Easy to drop on shared hosting or a VPS.
+Pure PHP + MySQL IPTV panel + companion Android app. No frameworks. No Composer. Shared-hosting friendly.
 
-**Player API is working/fixed** (Xtream-style) and the Android client consumes it cleanly.
+**Xtream-style Player API is working/fixed** and the Android client consumes it cleanly.
 
 ---
 
@@ -14,47 +14,61 @@ Pure PHP + MySQL IPTV panel + a companion Android app. No frameworks. No Compose
 
 The Android TV / Android phone app is **released for download**.
 
-I’ve put a lot into this project. While I released the APK publicly I will **keep full app source private**.
+I’ve put a lot into this project. While the APK is public, I’m keeping the **full app source private**.
 
 ---
 
-## What’s New 
+## What’s New (Recent Work)
 
 This repo has been upgraded heavily versus the early “basic panel” version:
 
-### ✅ Player API / Xtream Compatibility
-- Fixed `player_api.php` responses and compatibility improvements.
-- Playlist endpoint support via `get.php`.
-- Xtream-style routes supported (with rewrites): `/live/...` and `/seg/...` (Apache/Nginx examples included).
+### ✅ Web Installer (Styled Wizard)
+- **Auto-redirects to `/install/`** if not installed.
+- **Step-by-step wizard** with Next/Back (server-rendered; doesn’t break if JS fails).
+- Writes directly to **`config.php`** (no manual edits required).
+- Sets:
+  - DB host/name/user/pass
+  - `base_url`
+  - Admin username/password (shown on Finish)
+  - Optional **PayPal** + **CashApp** fields (not required)
+- Runs schema + migrations cleanly and creates an `installed.lock`.
 
-### 🔒 Security, Anti-Share, Limits
-- **Hard max_connections enforcement** (new streams denied when limit is reached).
-- **Per-session stream token rotation** (sharing a playlist URL won’t keep segments working).
-- **Device binding support** (optional lock / device tracking for accounts).
-- Rate limiting added (to protect login / API / playlist pulls).
-- **CSRF protection** added to admin actions (like EPG source changes).
-- Audit logging for key actions (auth fails, limit hits, admin actions).
+### ✅ Endpoint / URL Fixes
+- Dashboard endpoint references fixed:
+  - `/get.php` (not `/panel/get.php`)
+  - `/xmltv.php` (not `/panel/xmltv.php`)
 
-### 🗓️ EPG System (Real Pipeline)
-- EPG source management in admin (add / enable / disable / delete).
-- EPG import pipeline (XMLTV ingest → stored/cached for faster use).
-- `/xmltv.php` protected (username/password) + caching.
-- **Admin-wrapped EPG import page** (`/admin/epg_import.php`) with proper layout (no “plain white page”).
+### 🔒 Abuse Controls (Ban System)
+- Ban by **IP** and/or **username/account** for abuse.
+- Enforced across:
+  - `player_api.php`
+  - `get.php`
+  - `xmltv.php`
+  - streaming endpoints (`/live`, `/seg`, etc.)
+- Admin UI: **Abuse Bans** page with quick add/remove.
 
-### 📡 Stream Health / Probe Tools
-- Stream probe script + admin UI wrapper.
-- `/admin/stream_probe.php` is linked under **System** in the admin menu and matches the dashboard look.
+### 🧾 Telemetry + Audit Logs (Abuse Visibility)
+- Request logging table (`request_logs`) for API + stream hits.
+- Logs:
+  - username (when present), IP, UA, device_id
+  - endpoint/action
+  - result reason (`auth_fail`, `banned_ip`, `rate_limited`, `max_connections`, etc.)
+  - response time
+- Admin UI: **System → Telemetry**
+  - Top IPs / top failures
+  - Suspicious accounts (many IPs in a short window)
+  - Quick actions (ban IP/user)
 
-### 🧹 Bulk Delete Fix (FK-safe)
-- Fixed bulk delete to avoid `TRUNCATE channels` errors with foreign keys (`package_channels → channels`).
-- Child tables cleared first; parent table uses safe delete + auto-increment reset.
+### 💳 Billing Reports
+New **Billing → Reports** page:
+- **Monthly revenue grid** (up to last 12 months)
+- “Up for renewal” sections (users nearing expiry / renewal windows)
 
 ### 🧭 Admin UI Improvements
-- Sidebar changed to **categorized accordion**:
-  - Categories stay pinned.
-  - Submenus expand/collapse per section.
-  - Active page auto-opens the right group.
-- Admin pages styled consistently (dashboard-like wrapper for tools pages).
+- Sidebar updated to **accordion behavior**:
+  - Opening a new category closes the previous one
+  - Active page auto-opens the correct section
+- Admin pages kept consistent with dashboard styling.
 
 ---
 
@@ -68,55 +82,55 @@ This repo has been upgraded heavily versus the early “basic panel” version:
   - Active users/resellers
   - Recent stream checks
 
-Default admin (from `db.sql`):
-- **user:** `admin`
-- **pass:** `admin123`
-
-Change it immediately.
+> Default admin from early SQL files may exist in older installs. **Change it immediately.**
 
 ### 📺 Channel Management
 - Add / edit / delete channels
-- Categories (create/delete)
+- Categories
 - Fields:
   - Name, Category, Stream URL, Logo URL, EPG ID (tvg-id), Active toggle
 - Stream status + last check timestamp per channel
 
 ### 📂 M3U Import
-- Import from uploaded M3U or remote M3U URL
+- Import from uploaded M3U or remote URL
 - Parses: tvg-id, tvg-logo, group-title, name, URL
-- Skips broken entries; avoids exact duplicates
+- Skips broken entries; supports duplicate-friendly workflows
 
 ### ✅ Stream Checker
 - Fast cURL probe (HEAD)
 - Stores `status` + `last_check`
 
-### 🕒 EPG
-- Manage multiple EPG sources
+### 🕒 EPG System
+- Multiple EPG sources (add/enable/disable/delete)
 - Import + cache guide data for fast access
 - Protected XMLTV endpoint:
 ```text
 http://yourdomain.com/xmltv.php?username=USER&password=PASS
 ```
+- Admin-wrapped import page: `/admin/epg_import.php`
 
 ---
 
-## Install
+## Install (Web Wizard)
 
 1) Upload files to your web root  
-2) Import `db.sql` into MySQL  
-3) Set DB credentials in your config file  
-4) Login at `/admin` and change default admin password  
-5) Add channels (or import an M3U)  
-6) Add an EPG source and run import  
+2) Visit your domain → it redirects to `/install/` automatically  
+3) Enter DB credentials + base URL  
+4) (Optional) enter PayPal/CashApp fields  
+5) Finish → installer prints **admin username + password**  
+6) Login at `/admin`
 
-### Rewrites (important for Xtream-style URLs)
+**After install:** delete `/install/` or block it via web server rules (recommended).
+
+---
+
+## Rewrites (Xtream-style URLs)
+
 If you want `/live/...` and `/seg/...` to work, enable the provided Apache/Nginx rewrite rules.
 
 ---
 
 ## Cron (Recommended)
-
-Run probes + EPG import on a schedule (examples):
 
 ```bash
 */10 * * * * php /path/to/scripts/stream_probe.php --limit=400 >/dev/null 2>&1
