@@ -69,13 +69,13 @@ $topbar = file_get_contents(__DIR__.'/topbar.php'); // not used, include directl
 
       <div style="margin-top:10px;">
         <div class="badge">Playlist</div>
-        <pre class="linkbox"><?=e($host."/panel/get.php?username=".$user['username']."&password=YOUR_PASSWORD&type=m3u_plus")?></pre>
+        <pre class="linkbox"><?=e($host."/get.php?username=".$user['username']."&password=YOUR_PASSWORD&type=m3u_plus")?></pre>
       </div>
       <p class="muted" style="font-size:12px;margin-top:6px;">Replace YOUR_PASSWORD with your actual password.</p>
 
       <div style="margin-top:10px;">
         <div class="badge">EPG XMLTV</div>
-        <pre class="linkbox"><?=e($host."/panel/xmltv.php?u=".$user['username']."&p=YOUR_PASSWORD")?></pre>
+        <pre class="linkbox"><?=e($host."/xmltv.php?u=".$user['username']."&p=YOUR_PASSWORD")?></pre>
       </div>
       <p class="muted" style="font-size:12px;margin-top:6px;">Replace YOUR_PASSWORD with your actual password.</p>
 

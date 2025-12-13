@@ -59,6 +59,8 @@ switch ($action) {
       $pdo->exec("SET FOREIGN_KEY_CHECKS=0");
       foreach ([
         'package_channels',
+        'package_movies',
+        'package_series',
         'user_packages',
         'user_devices',
         'audit_logs',

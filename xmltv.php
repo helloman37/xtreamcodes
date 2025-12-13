@@ -3,6 +3,9 @@ require_once __DIR__ . '/api_common.php';
 
 header("Content-Type: application/xml; charset=utf-8");
 
+// Request telemetry (admin -> Telemetry)
+telemetry_init('xmltv', '');
+
 $pdo = db();
 ensure_categories($pdo);
 
@@ -10,6 +13,7 @@ $username = trim($_GET['username'] ?? '');
 $password = (string)($_GET['password'] ?? '');
 
 if ($username === '' || $password === '') {
+  telemetry_reason('missing_credentials');
   http_response_code(401);
   echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><tv></tv>";
   exit;
@@ -21,14 +25,27 @@ $st->execute([$username]);
 $user = $st->fetch(PDO::FETCH_ASSOC);
 
 if (!$user || !password_verify($password, $user['password_hash'])) {
+  telemetry_reason('auth_fail', ['username'=>$username]);
   http_response_code(401);
   echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><tv></tv>";
   exit;
 }
 
+telemetry_set_user((int)$user['id'], (string)$user['username']);
+
 // policy: IP allow/deny
 $ip = get_client_ip();
+$ban = abuse_ban_lookup($pdo, $ip, (int)$user['id']);
+if ($ban) {
+  audit_log('ban_block', (int)$user['id'], ['ban_type'=>$ban['ban_type'] ?? 'user','ip'=>$ip]);
+  telemetry_reason('banned');
+  http_response_code(403);
+  echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><tv></tv>";
+  exit;
+}
+
 if (!ip_allowed($ip, $user['ip_allowlist'] ?? null, $user['ip_denylist'] ?? null)) {
+  telemetry_reason('ip_not_allowed');
   http_response_code(403);
   echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><tv></tv>";
   exit;
@@ -44,6 +61,7 @@ $st = $pdo->prepare("
 $st->execute([(int)$user['id']]);
 $sub = $st->fetch(PDO::FETCH_ASSOC);
 if (!$sub) {
+  telemetry_reason('no_subscription');
   http_response_code(403);
   echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><tv></tv>";
   exit;

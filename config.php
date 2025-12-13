@@ -1,14 +1,20 @@
 <?php
 // config.php
-// EDIT THESE to your real cPanel creds + domain.
+// -----------------------------------------------------------------------------
+// DO NOT hard-edit this file in production.
+// Use the built-in installer at /install to set DB creds + base_url safely.
+// The installer writes config.local.php which overrides these defaults.
+// -----------------------------------------------------------------------------
+
 // PayPal REST API (storefront)
 if (!defined('PAYPAL_CLIENT_ID')) define('PAYPAL_CLIENT_ID', '');
 if (!defined('PAYPAL_SECRET')) define('PAYPAL_SECRET', '');
 if (!defined('PAYPAL_SANDBOX')) define('PAYPAL_SANDBOX', true);
+
 // CashApp storefront (owner cashtag)
 if (!defined('CASHAPP_CASHTAG')) define('CASHAPP_CASHTAG', '$');
 
-return [
+$defaults = [
   'db' => [
     'host' => 'localhost',
     'name' => '',
@@ -32,9 +38,7 @@ return [
   // Recommended for your Android app; keep false for generic IPTV apps.
   'strict_device_id' => false,
 
-
-  // Optional: Discord/Telegram/Slack webhook for security/ops alerts
-  // (expects JSON body)
+  // Optional: Discord/Telegram/Slack webhook for security/ops alerts (expects JSON body)
   'webhook_url' => '',
 
   // device/connection window in seconds
@@ -44,3 +48,15 @@ return [
   'max_ip_changes' => 3,
   'max_ip_window'  => 600
 ];
+
+// Optional local overrides written by /install
+$local_path = __DIR__ . '/config.local.php';
+$local = [];
+if (is_file($local_path)) {
+  $tmp = require $local_path;
+  if (is_array($tmp)) $local = $tmp;
+}
+
+// Deep-ish merge: local values override defaults.
+$merged = array_replace_recursive($defaults, $local);
+return $merged;

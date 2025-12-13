@@ -18,6 +18,14 @@ if ($u==='' || $id<1 || $url==='') {
 }
 
 $pdo = db();
+$ip = get_client_ip();
+$ban = abuse_ban_lookup($pdo, $ip, null);
+if ($ban) {
+  audit_log('ban_block', null, ['ban_type'=>'ip','ip'=>$ip]);
+  http_response_code(403);
+  exit('Banned');
+}
+
 ensure_categories($pdo);
 
 $ip = get_client_ip();

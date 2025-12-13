@@ -19,7 +19,12 @@ $type     = strtolower($_GET['type'] ?? 'm3u');
 // auto|direct_protected|standard_protected|token_protected
 $link_type = strtolower($_GET['link'] ?? 'token_protected');
 
+// Request telemetry (admin -> Telemetry)
+telemetry_init('get', $type);
+telemetry_meta(['link'=>$link_type]);
+
 if ($username === '' || $password === '') {
+  telemetry_reason('missing_credentials');
   http_response_code(400);
   echo "Missing username or password";
   exit;
@@ -34,14 +39,27 @@ $st->execute([$username]);
 $user = $st->fetch(PDO::FETCH_ASSOC);
 
 if (!$user || !password_verify($password, $user['password_hash'])) {
+  telemetry_reason('auth_fail', ['username'=>$username]);
   http_response_code(401);
   echo "Invalid credentials";
   exit;
 }
 
+telemetry_set_user((int)$user['id'], (string)$user['username']);
+
 // Policy: IP allow/deny
 $ip = get_client_ip();
+$ban = abuse_ban_lookup($pdo, $ip, (int)$user['id']);
+if ($ban) {
+  audit_log('ban_block', (int)$user['id'], ['ban_type'=>$ban['ban_type'] ?? 'user','ip'=>$ip]);
+  telemetry_reason('banned');
+  http_response_code(403);
+  echo "Banned";
+  exit;
+}
+
 if (!ip_allowed($ip, $user['ip_allowlist'] ?? null, $user['ip_denylist'] ?? null)) {
+  telemetry_reason('ip_not_allowed');
   http_response_code(403);
   echo "IP not allowed";
   exit;
@@ -59,6 +77,7 @@ $st->execute([(int)$user['id']]);
 $sub = $st->fetch(PDO::FETCH_ASSOC);
 
 if (!$sub) {
+  telemetry_reason('no_subscription');
   http_response_code(403);
   echo "No active subscription";
   exit;
@@ -74,6 +93,7 @@ $app_logo_url = $user_logo ?: ($config['app_logo_url'] ?? '');
 $tmdb_region  = $user_region ?: ($config['tmdb_region'] ?? 'US');
 
 if ($type === 'config') {
+  telemetry_reason('config');
   header('Content-Type: application/json; charset=utf-8');
   echo json_encode([
     'tmdb_api_key' => $tmdb_api_key,
@@ -155,15 +175,17 @@ foreach ($channels as $c) {
 /* ---------- VOD + SERIES (m3u_plus) ---------- */
 if ($type === 'm3u_plus') {
   // Movies (VOD)
+  [$vod_pkg_sql, $vod_pkg_params] = package_filter_sql_movies($pkg_ids, 'm');
   $st = $pdo->prepare("
     SELECT m.id,m.name,m.stream_url,m.poster_url,m.container_ext,IFNULL(m.is_adult,0) AS is_adult, vc.name AS cat_name
     FROM movies m
     LEFT JOIN vod_categories vc ON vc.id=m.category_id
     WHERE 1=1
       ".($adult_ok ? "" : " AND IFNULL(m.is_adult,0)=0 ")."
+      $vod_pkg_sql
     ORDER BY vc.name, m.name
   ");
-  $st->execute([]);
+  $st->execute($vod_pkg_params);
   $movies = $st->fetchAll(PDO::FETCH_ASSOC);
 
   foreach ($movies as $m) {
@@ -189,6 +211,7 @@ if ($type === 'm3u_plus') {
   }
 
   // Series episodes (flattened playlist)
+  [$ser_pkg_sql, $ser_pkg_params] = package_filter_sql_series($pkg_ids, 's');
   $st = $pdo->prepare("
     SELECT e.id, e.title, e.season_num, e.episode_num, e.container_ext,
            s.name AS series_name, s.cover_url, sc.name AS cat_name
@@ -197,9 +220,10 @@ if ($type === 'm3u_plus') {
     LEFT JOIN series_categories sc ON sc.id=s.category_id
     WHERE 1=1
       ".($adult_ok ? "" : " AND IFNULL(s.is_adult,0)=0 ")."
+      $ser_pkg_sql
     ORDER BY sc.name, s.name, e.season_num, e.episode_num
   ");
-  $st->execute([]);
+  $st->execute($ser_pkg_params);
   $eps = $st->fetchAll(PDO::FETCH_ASSOC);
 
   foreach ($eps as $e) {

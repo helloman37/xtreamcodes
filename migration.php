@@ -128,6 +128,49 @@ function db_migrate(PDO $pdo): void {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   ");
 
+  // High-volume request telemetry (API hits + stream starts). Keep this separate from audit_logs.
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS request_logs (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      endpoint VARCHAR(64) NOT NULL,
+      action VARCHAR(64) NULL,
+      user_id INT NULL,
+      reseller_id INT NULL,
+      username VARCHAR(64) NULL,
+      ip VARCHAR(45) NULL,
+      user_agent VARCHAR(255) NULL,
+      device_fp VARCHAR(128) NULL,
+      status_code SMALLINT NULL,
+      duration_ms INT NULL,
+      reason VARCHAR(64) NULL,
+      meta_json TEXT NULL,
+      INDEX idx_req_created (created_at),
+      INDEX idx_req_ip (ip),
+      INDEX idx_req_user (user_id),
+      INDEX idx_req_endpoint (endpoint),
+      INDEX idx_req_reason (reason)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  ");
+
+  // Manual abuse bans (IP and/or user). Enforced by API + stream endpoints.
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS abuse_bans (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      ban_type ENUM('ip','user') NOT NULL,
+      ip VARCHAR(45) NULL,
+      user_id INT NULL,
+      reason VARCHAR(255) NULL,
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NULL,
+      INDEX idx_abuse_ip (ip),
+      INDEX idx_abuse_user (user_id),
+      INDEX idx_abuse_expires (expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  ");
+
+
   $pdo->exec("
     CREATE TABLE IF NOT EXISTS epg_programs (
       id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -238,6 +281,29 @@ function db_migrate(PDO $pdo): void {
       container_ext VARCHAR(10) NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_ep_series (series_id, season_num, episode_num),
+      FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  ");
+
+  /* ---------- Package restrictions for VOD / Series ---------- */
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS package_movies (
+      package_id INT NOT NULL,
+      movie_id INT NOT NULL,
+      PRIMARY KEY (package_id, movie_id),
+      INDEX idx_pm_movie (movie_id),
+      FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE CASCADE,
+      FOREIGN KEY (movie_id) REFERENCES movies(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  ");
+
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS package_series (
+      package_id INT NOT NULL,
+      series_id INT NOT NULL,
+      PRIMARY KEY (package_id, series_id),
+      INDEX idx_ps_series (series_id),
+      FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE CASCADE,
       FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   ");

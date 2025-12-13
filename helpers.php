@@ -1,6 +1,46 @@
 <?php
 // helpers.php
 
+// -----------------------------------------------------------------------------
+// Install guard: if the app isn't configured yet, redirect to /install.
+// (Some public pages do not touch db.php, so we guard here too.)
+// Define IPTV_NO_INSTALL_GUARD before requiring helpers.php to bypass.
+// -----------------------------------------------------------------------------
+if (!defined('IPTV_NO_INSTALL_GUARD') && PHP_SAPI !== 'cli') {
+  $path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH) ?: '';
+  $lock = __DIR__ . '/install/installed.lock';
+
+  $installed = false;
+
+  // Primary: installer lock
+  if (is_file($lock)) $installed = true;
+
+  // Back-compat: old local override file
+  if (!$installed && is_file(__DIR__ . '/config.local.php')) $installed = true;
+
+  // Fallback: config.php has non-empty DB name + user
+  if (!$installed && is_file(__DIR__ . '/config.php')) {
+    try {
+      $cfg = require __DIR__ . '/config.php';
+      if (is_array($cfg) && !empty($cfg['db']['name']) && !empty($cfg['db']['user'])) {
+        $installed = true;
+      }
+    } catch (Throwable $e) {
+      // ignore
+    }
+  }
+
+  if (!$installed && !str_starts_with($path, '/install')) {
+    // Redirect to installer using the current app base path (supports subfolder installs).
+    $script = $_SERVER['SCRIPT_NAME'] ?? '/index.php';
+    // Normalize Windows-style backslashes to forward slashes.
+    $base   = rtrim(str_replace('\\', '/', dirname($script)), '/');
+    $dest   = ($base ? $base : '') . '/install/';
+    header('Location: ' . $dest);
+    exit;
+  }
+}
+
 function e($str) {
   return htmlspecialchars((string)$str, ENT_QUOTES, 'UTF-8');
 }
@@ -200,6 +240,45 @@ function ip_allowed(string $ip, ?string $allowlist, ?string $denylist): bool {
   return false;
 }
 
+/* ---------- ABUSE BANS ---------- */
+/**
+ * Returns the active ban row if the IP or user is currently banned, else null.
+ * Table: abuse_bans (created by runtime migrations).
+ */
+function abuse_ban_lookup(PDO $pdo, string $ip, ?int $user_id=null): ?array {
+  try {
+    // IP ban (takes priority)
+    $st = $pdo->prepare("
+      SELECT * FROM abuse_bans
+      WHERE ban_type='ip' AND ip=?
+        AND (expires_at IS NULL OR expires_at > NOW())
+      ORDER BY (expires_at IS NULL) DESC, expires_at DESC, id DESC
+      LIMIT 1
+    ");
+    $st->execute([$ip]);
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+    if ($row) return $row;
+
+    // User ban
+    if ($user_id) {
+      $st = $pdo->prepare("
+        SELECT * FROM abuse_bans
+        WHERE ban_type='user' AND user_id=?
+          AND (expires_at IS NULL OR expires_at > NOW())
+        ORDER BY (expires_at IS NULL) DESC, expires_at DESC, id DESC
+        LIMIT 1
+      ");
+      $st->execute([(int)$user_id]);
+      $row = $st->fetch(PDO::FETCH_ASSOC);
+      if ($row) return $row;
+    }
+  } catch (Throwable $e) {
+    return null;
+  }
+  return null;
+}
+
+
 function audit_log(string $event, ?int $user_id=null, array $meta=[], ?int $reseller_id=null): void {
   try {
     $pdo = db();
@@ -236,6 +315,88 @@ function audit_log(string $event, ?int $user_id=null, array $meta=[], ?int $rese
   } catch (Throwable $e) {
     // ignore
   }
+}
+
+/* ---------- REQUEST TELEMETRY (API + STREAM) ---------- */
+// Usage:
+//   telemetry_init('player_api', $action);
+//   telemetry_set_user($user['id'], $user['username']);
+//   telemetry_reason('auth_fail');
+// A shutdown handler writes to request_logs.
+
+function telemetry_init(string $endpoint, string $action=''): void {
+  if (PHP_SAPI === 'cli') return;
+  // Avoid logging installer pages.
+  $path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH) ?: '';
+  if (str_starts_with($path, '/install')) return;
+
+  $GLOBALS['__telemetry'] = [
+    't0' => microtime(true),
+    'endpoint' => substr($endpoint, 0, 64),
+    'action' => substr($action, 0, 64),
+    'user_id' => null,
+    'reseller_id' => null,
+    'username' => null,
+    'reason' => 'ok',
+    'meta' => []
+  ];
+
+  register_shutdown_function(function() {
+    $t = $GLOBALS['__telemetry'] ?? null;
+    if (!is_array($t) || empty($t['endpoint'])) return;
+
+    $dur = (int)round((microtime(true) - (float)($t['t0'] ?? microtime(true))) * 1000);
+    $status = http_response_code();
+    if (!$status) $status = 200;
+
+    $ip = get_client_ip();
+    $ua = substr($_SERVER['HTTP_USER_AGENT'] ?? 'unknown', 0, 250);
+    $dev = '';
+    try { $dev = get_device_fingerprint(); } catch (Throwable $e) { $dev = ''; }
+
+    $meta = $t['meta'] ?? [];
+
+    try {
+      $pdo = db();
+      $pdo->prepare("\n        INSERT INTO request_logs\n          (endpoint, action, user_id, reseller_id, username, ip, user_agent, device_fp, status_code, duration_ms, reason, meta_json)\n        VALUES\n          (?,?,?,?,?,?,?,?,?,?,?,?)\n      ")->execute([
+        $t['endpoint'],
+        ($t['action'] !== '' ? $t['action'] : null),
+        $t['user_id'],
+        $t['reseller_id'],
+        $t['username'],
+        $ip,
+        $ua,
+        ($dev !== '' ? $dev : null),
+        $status,
+        $dur,
+        ($t['reason'] !== '' ? $t['reason'] : null),
+        (!empty($meta) ? json_encode($meta, JSON_UNESCAPED_SLASHES) : null)
+      ]);
+    } catch (Throwable $e) {
+      // ignore
+    }
+  });
+}
+
+function telemetry_set_user(int $user_id, string $username='', ?int $reseller_id=null): void {
+  if (!isset($GLOBALS['__telemetry']) || !is_array($GLOBALS['__telemetry'])) return;
+  $GLOBALS['__telemetry']['user_id'] = $user_id;
+  if ($username !== '') $GLOBALS['__telemetry']['username'] = substr($username, 0, 64);
+  if ($reseller_id !== null) $GLOBALS['__telemetry']['reseller_id'] = (int)$reseller_id;
+}
+
+function telemetry_reason(string $reason, array $meta_add=[]): void {
+  if (!isset($GLOBALS['__telemetry']) || !is_array($GLOBALS['__telemetry'])) return;
+  $GLOBALS['__telemetry']['reason'] = substr($reason, 0, 64);
+  if ($meta_add) {
+    $GLOBALS['__telemetry']['meta'] = array_merge($GLOBALS['__telemetry']['meta'] ?? [], $meta_add);
+  }
+}
+
+function telemetry_meta(array $meta_add): void {
+  if (!isset($GLOBALS['__telemetry']) || !is_array($GLOBALS['__telemetry'])) return;
+  if (!$meta_add) return;
+  $GLOBALS['__telemetry']['meta'] = array_merge($GLOBALS['__telemetry']['meta'] ?? [], $meta_add);
 }
 
 /* ---------- TOKENS ---------- */

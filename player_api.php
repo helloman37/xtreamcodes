@@ -8,8 +8,13 @@ header("Content-Type: application/json; charset=utf-8");
 
 $ip = get_client_ip();
 
+// Request telemetry (admin -> Telemetry)
+$__action = strtolower((string)($_GET['action'] ?? ''));
+telemetry_init('player_api', $__action);
+
 // Basic rate limiting (helps stop brute force / app spam)
 if (!rate_limit('player_api_ip_' . $ip, 120, 60)) {
+  telemetry_reason('rate_limited');
   http_response_code(429);
   echo json_encode(["error"=>"rate_limited"]);
   exit;
@@ -20,12 +25,23 @@ $password = (string)($_GET['password'] ?? '');
 $action   = strtolower($_GET['action'] ?? '');
 
 if ($username === '' || $password === '') {
+  telemetry_reason('missing_credentials');
   echo json_encode(["user_info"=>["auth"=>0],"error"=>"Missing credentials"]);
   exit;
 }
 
 $pdo = db();
 ensure_categories($pdo);
+
+// Hard bans (IP/user)
+$ban = abuse_ban_lookup($pdo, $ip, null);
+if ($ban) {
+  audit_log('ban_block', null, ['ban_type'=>'ip','ip'=>$ip]);
+  telemetry_reason('banned_ip');
+  http_response_code(403);
+  echo json_encode(["user_info"=>["auth"=>0],"error"=>"banned"]);
+  exit;
+}
 
 /* ---------- AUTH ---------- */
 $st = $pdo->prepare("SELECT * FROM users WHERE username=? AND status='active' LIMIT 1");
@@ -34,13 +50,27 @@ $user = $st->fetch(PDO::FETCH_ASSOC);
 
 if (!$user || !password_verify($password, $user['password_hash'])) {
   audit_log('auth_fail', null, ['u'=>$username]);
+  telemetry_reason('auth_fail', ['username'=>$username]);
   echo json_encode(["user_info"=>["auth"=>0],"error"=>"Invalid credentials"]);
+  exit;
+}
+
+telemetry_set_user((int)$user['id'], (string)$user['username']);
+
+// Hard bans (user)
+$ban = abuse_ban_lookup($pdo, $ip, (int)$user['id']);
+if ($ban) {
+  audit_log('ban_block_user', (int)$user['id'], ['ban_type'=>$ban['ban_type'] ?? 'user','ip'=>$ip]);
+  telemetry_reason('banned_user');
+  http_response_code(403);
+  echo json_encode(["user_info"=>["auth"=>0],"error"=>"banned"]);
   exit;
 }
 
 // User policy: IP allow/deny
 if (!ip_allowed($ip, $user['ip_allowlist'] ?? null, $user['ip_denylist'] ?? null)) {
   audit_log('ip_block', (int)$user['id'], ['ip'=>$ip]);
+  telemetry_reason('ip_not_allowed');
   http_response_code(403);
   echo json_encode(["user_info"=>["auth"=>0],"error"=>"ip_not_allowed"]);
   exit;
@@ -57,6 +87,7 @@ $st = $pdo->prepare("
 $st->execute([(int)$user['id']]);
 $sub = $st->fetch(PDO::FETCH_ASSOC);
 if (!$sub) {
+  telemetry_reason('no_subscription');
   echo json_encode(["user_info"=>["auth"=>0],"error"=>"No active subscription"]);
   exit;
 }
@@ -231,8 +262,20 @@ if ($action === 'get_short_epg' || $action === 'get_simple_data_table') {
 
 /* ---------- VOD CATEGORIES ---------- */
 if ($action === 'get_vod_categories') {
-  $st = $pdo->prepare("SELECT id,name FROM vod_categories ORDER BY name");
-  $st->execute([]);
+  // If packages are assigned, only show categories that contain accessible movies.
+  [$pkg_sql, $pkg_params] = package_filter_sql_movies($pkg_ids, 'm');
+
+  $sql = "
+    SELECT DISTINCT vc.id, vc.name
+    FROM vod_categories vc
+    JOIN movies m ON m.category_id=vc.id
+    WHERE 1=1
+      ".($adult_ok ? "" : " AND IFNULL(m.is_adult,0)=0 ")."
+      $pkg_sql
+    ORDER BY vc.name
+  ";
+  $st = $pdo->prepare($sql);
+  $st->execute($pkg_params);
   $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 
   $out = [];
@@ -251,9 +294,12 @@ if ($action === 'get_vod_categories') {
 if ($action === 'get_vod_streams') {
   $category_id = (int)($_GET['category_id'] ?? 0);
 
-  $params = [];
+  [$pkg_sql, $pkg_params] = package_filter_sql_movies($pkg_ids, 'm');
+
+  $params = $pkg_params;
   $where = " WHERE 1=1 ";
   if (!$adult_ok) $where .= " AND IFNULL(m.is_adult,0)=0 ";
+  $where .= $pkg_sql;
   if ($category_id > 0) { $where .= " AND m.category_id=? "; $params[] = $category_id; }
 
   $st = $pdo->prepare("
@@ -299,6 +345,19 @@ if ($action === 'get_vod_info') {
   if (!$m) { echo json_encode(["error"=>"not_found"]); exit; }
   if (!$adult_ok && (int)($m["is_adult"] ?? 0) === 1) { http_response_code(403); echo json_encode(["error"=>"adult_block"]); exit; }
 
+  // Package restriction for VOD
+  if ($pkg_ids) {
+    $in = implode(',', array_fill(0, count($pkg_ids), '?'));
+    $params = array_merge([$vod_id], $pkg_ids);
+    $st = $pdo->prepare("SELECT 1 FROM package_movies pm WHERE pm.movie_id=? AND pm.package_id IN ($in) LIMIT 1");
+    $st->execute($params);
+    if (!$st->fetch()) {
+      http_response_code(403);
+      echo json_encode(["error"=>"not_in_package"]);
+      exit;
+    }
+  }
+
   $ext = $m['container_ext'];
   if (!$ext) $ext = preg_match("/\.m3u8(\?|$)/i",(string)$m["stream_url"]) ? "m3u8" : "mp4";
 
@@ -325,8 +384,20 @@ if ($action === 'get_vod_info') {
 
 /* ---------- SERIES CATEGORIES ---------- */
 if ($action === 'get_series_categories') {
-  $st = $pdo->prepare("SELECT id,name FROM series_categories ORDER BY name");
-  $st->execute([]);
+  // If packages are assigned, only show categories that contain accessible series.
+  [$pkg_sql, $pkg_params] = package_filter_sql_series($pkg_ids, 's');
+
+  $sql = "
+    SELECT DISTINCT sc.id, sc.name
+    FROM series_categories sc
+    JOIN series s ON s.category_id=sc.id
+    WHERE 1=1
+      ".($adult_ok ? "" : " AND IFNULL(s.is_adult,0)=0 ")."
+      $pkg_sql
+    ORDER BY sc.name
+  ";
+  $st = $pdo->prepare($sql);
+  $st->execute($pkg_params);
   $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 
   $out = [];
@@ -345,9 +416,12 @@ if ($action === 'get_series_categories') {
 if ($action === 'get_series') {
   $category_id = (int)($_GET['category_id'] ?? 0);
 
-  $params = [];
+  [$pkg_sql, $pkg_params] = package_filter_sql_series($pkg_ids, 's');
+
+  $params = $pkg_params;
   $where = " WHERE 1=1 ";
   if (!$adult_ok) $where .= " AND IFNULL(s.is_adult,0)=0 ";
+  $where .= $pkg_sql;
   if ($category_id > 0) { $where .= " AND s.category_id=? "; $params[] = $category_id; }
 
   $st = $pdo->prepare("
@@ -386,6 +460,19 @@ if ($action === 'get_series_info') {
   $s = $st->fetch(PDO::FETCH_ASSOC);
   if (!$s) { echo json_encode(["error"=>"not_found"]); exit; }
   if (!$adult_ok && (int)($s["is_adult"] ?? 0) === 1) { http_response_code(403); echo json_encode(["error"=>"adult_block"]); exit; }
+
+  // Package restriction for Series
+  if ($pkg_ids) {
+    $in = implode(',', array_fill(0, count($pkg_ids), '?'));
+    $params = array_merge([$series_id], $pkg_ids);
+    $st = $pdo->prepare("SELECT 1 FROM package_series ps WHERE ps.series_id=? AND ps.package_id IN ($in) LIMIT 1");
+    $st->execute($params);
+    if (!$st->fetch()) {
+      http_response_code(403);
+      echo json_encode(["error"=>"not_in_package"]);
+      exit;
+    }
+  }
 
   $st = $pdo->prepare("
     SELECT id,season_num,episode_num,title,stream_url,container_ext,created_at

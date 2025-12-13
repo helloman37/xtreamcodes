@@ -50,6 +50,7 @@
         <summary class="nav-group-summary"><span class="icon">💳</span><span>Billing</span><span class="chev">▸</span></summary>
         <div class="nav-sub">
           <a class="nav-item" href="plans_subs.php"><span class="icon">💳</span><span>Plans / Subs</span></a>
+          <a class="nav-item" href="billing_reports.php"><span class="icon">📈</span><span>Reports</span></a>
         </div>
       </details>
 
@@ -60,6 +61,8 @@
           <a class="nav-item" href="stream_probe.php"><span class="icon">🧪</span><span>Stream Probe</span></a>
           <a class="nav-item" href="health.php"><span class="icon">❤️</span><span>Health</span></a>
           <a class="nav-item" href="audit_logs.php"><span class="icon">🧾</span><span>Audit Logs</span></a>
+          <a class="nav-item" href="telemetry.php"><span class="icon">📈</span><span>Telemetry</span></a>
+          <a class="nav-item" href="abuse_bans.php"><span class="icon">⛔</span><span>Abuse Bans</span></a>
           <a class="nav-item" href="bulk_delete.php"><span class="icon">🧨</span><span>Bulk Delete</span></a>
           <a class="nav-item" href="signout.php"><span class="icon">🚪</span><span>Logout</span></a>
         </div>
@@ -87,6 +90,34 @@
         }
       })();
     </script>
+  
+    <script>
+      // Sidebar accordion: keep only one group open at a time
+      (function iptvAccordion(){
+        var nav = document.getElementById('sideNav');
+        if(!nav) return;
+        var groups = Array.prototype.slice.call(nav.querySelectorAll('details.nav-group'));
+        function closeOthers(openEl){
+          groups.forEach(function(g){
+            if(g !== openEl) g.removeAttribute('open');
+          });
+        }
+        groups.forEach(function(g){
+          g.addEventListener('toggle', function(){
+            if(g.open) closeOthers(g);
+          });
+          // Fallback for browsers that don't fire toggle reliably
+          var s = g.querySelector('summary');
+          if(s){
+            s.addEventListener('click', function(){
+              // allow native toggle first; then close others on next tick
+              setTimeout(function(){ if(g.open) closeOthers(g); }, 0);
+            });
+          }
+        });
+      })();
+    </script>
+
   </aside>
 
   <main class="main">

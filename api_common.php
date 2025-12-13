@@ -49,3 +49,23 @@ function package_filter_sql(array $package_ids, string $channels_alias='c'): arr
   $sql = " AND EXISTS (SELECT 1 FROM package_channels pc WHERE pc.channel_id={$channels_alias}.id AND pc.package_id IN ($in)) ";
   return [$sql, $package_ids];
 }
+
+/**
+ * Builds SQL filter clause for VOD/movie restrictions.
+ */
+function package_filter_sql_movies(array $package_ids, string $movies_alias='m'): array {
+  if (!$package_ids) return ['', []];
+  $in = implode(',', array_fill(0, count($package_ids), '?'));
+  $sql = " AND EXISTS (SELECT 1 FROM package_movies pm WHERE pm.movie_id={$movies_alias}.id AND pm.package_id IN ($in)) ";
+  return [$sql, $package_ids];
+}
+
+/**
+ * Builds SQL filter clause for Series restrictions.
+ */
+function package_filter_sql_series(array $package_ids, string $series_alias='s'): array {
+  if (!$package_ids) return ['', []];
+  $in = implode(',', array_fill(0, count($package_ids), '?'));
+  $sql = " AND EXISTS (SELECT 1 FROM package_series ps WHERE ps.series_id={$series_alias}.id AND ps.package_id IN ($in)) ";
+  return [$sql, $package_ids];
+}

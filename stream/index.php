@@ -12,21 +12,36 @@ $id = (int)($_GET['id'] ?? 0);
 $type = strtolower((string)($_GET['type'] ?? 'live'));
 if (!in_array($type, ['live','movie','episode'], true)) { http_response_code(400); exit('Bad type'); }
 
+// Request telemetry (admin -> Telemetry)
+telemetry_init('stream', $type);
+telemetry_meta(['id'=>$id]);
+
 $exp   = (int)($_GET['exp'] ?? 0);
 $token = (string)($_GET['token'] ?? '');
 
 if ($u === '' || $id < 1) {
+  telemetry_reason('bad_params');
   http_response_code(400);
   exit("Bad params");
 }
 
 $pdo = db();
+$ip = get_client_ip();
+$ban = abuse_ban_lookup($pdo, $ip, null);
+if ($ban) {
+  audit_log('ban_block', null, ['ban_type'=>'ip','ip'=>$ip]);
+  telemetry_reason('banned_ip');
+  http_response_code(403);
+  exit('Banned');
+}
+
 ensure_categories($pdo);
 
 $ip = get_client_ip();
 $ua = substr($_SERVER['HTTP_USER_AGENT'] ?? 'unknown', 0, 250);
 $device_fp = get_device_fingerprint();
 if ($device_fp==='' && strict_device_id_enabled()) {
+  telemetry_reason('device_id_required');
   http_response_code(403);
   exit('device_id_required');
 }
@@ -36,15 +51,19 @@ $st = $pdo->prepare("SELECT * FROM users WHERE username=? AND status='active' LI
 $st->execute([$u]);
 $user = $st->fetch(PDO::FETCH_ASSOC);
 if (!$user) {
+  telemetry_reason('user_not_found', ['username'=>$u]);
   http_response_code(401);
   exit("Invalid user");
 }
+
+telemetry_set_user((int)$user['id'], (string)$user['username']);
 
 /* token OR password */
 $token_ok = ($token && $exp && verify_token($u, $id, $exp, $token, $type));
 $pass_ok  = ($p !== '' && password_verify($p, $user['password_hash']));
 if (!$token_ok && !$pass_ok) {
   audit_log('stream_auth_fail', (int)$user['id'], ['channel_id'=>$id]);
+  telemetry_reason('auth_fail', ['id'=>$id]);
   http_response_code(401);
   exit("Invalid credentials");
 }
@@ -52,6 +71,7 @@ if (!$token_ok && !$pass_ok) {
 // Policy: IP allow/deny
 if (!ip_allowed($ip, $user['ip_allowlist'] ?? null, $user['ip_denylist'] ?? null)) {
   audit_log('ip_block', (int)$user['id'], ['ip'=>$ip,'channel_id'=>$id]);
+  telemetry_reason('ip_not_allowed', ['ip'=>$ip,'id'=>$id]);
   http_response_code(403);
   exit("IP not allowed");
 }
@@ -67,6 +87,7 @@ $st = $pdo->prepare("
 $st->execute([(int)$user['id']]);
 $sub = $st->fetch(PDO::FETCH_ASSOC);
 if (!$sub) {
+  telemetry_reason('no_subscription');
   http_response_code(403);
   exit("No active subscription");
 }
@@ -89,6 +110,7 @@ try {
     $primary = (string)($st->fetch(PDO::FETCH_ASSOC)['fingerprint'] ?? '');
     if ($primary && $device_fp!=='' && !hash_equals($primary, $device_fp)) {
       audit_log('device_lock_block', (int)$user['id'], ['ip'=>$ip,'channel_id'=>$id]);
+      telemetry_reason('device_lock');
       http_response_code(403);
       exit("Device locked");
     }
@@ -104,24 +126,55 @@ if ($max_devices > 0 && $device_fp !== '') {
   $dev_count = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
   if ($dev_count > $max_devices) {
     audit_log('max_devices', (int)$user['id'], ['count'=>$dev_count,'max'=>$max_devices]);
+    telemetry_reason('max_devices', ['count'=>$dev_count,'max'=>$max_devices]);
     http_response_code(403);
     exit('max_devices_reached');
   }
 }
 
-/* package/bouquet enforcement (live only) */
+/* package/bouquet enforcement (live + VOD + Series) */
 $pkg_ids = user_package_ids($pdo, (int)$user['id']);
-if ($type !== 'live') { $pkg_ids = []; }
 
 if ($pkg_ids) {
   $in = implode(',', array_fill(0, count($pkg_ids), '?'));
-  $params = array_merge([$id], $pkg_ids);
-  $st = $pdo->prepare("SELECT 1 FROM package_channels pc WHERE pc.channel_id=? AND pc.package_id IN ($in) LIMIT 1");
-  $st->execute($params);
-  if (!$st->fetch()) {
-    audit_log('package_block', (int)$user['id'], ['channel_id'=>$id]);
-    http_response_code(403);
-    exit("Not in your package");
+  if ($type === 'live') {
+    $params = array_merge([$id], $pkg_ids);
+    $st = $pdo->prepare("SELECT 1 FROM package_channels pc WHERE pc.channel_id=? AND pc.package_id IN ($in) LIMIT 1");
+    $st->execute($params);
+    if (!$st->fetch()) {
+      audit_log('package_block', (int)$user['id'], ['type'=>'live','id'=>$id]);
+      telemetry_reason('package_block', ['type'=>'live','id'=>$id]);
+      http_response_code(403);
+      exit("Not in your package");
+    }
+  } elseif ($type === 'movie') {
+    $params = array_merge([$id], $pkg_ids);
+    $st = $pdo->prepare("SELECT 1 FROM package_movies pm WHERE pm.movie_id=? AND pm.package_id IN ($in) LIMIT 1");
+    $st->execute($params);
+    if (!$st->fetch()) {
+      audit_log('package_block', (int)$user['id'], ['type'=>'movie','id'=>$id]);
+      telemetry_reason('package_block', ['type'=>'movie','id'=>$id]);
+      http_response_code(403);
+      exit("Not in your package");
+    }
+  } else { // episode
+    // episode belongs to a series; package rules are on the series
+    $st = $pdo->prepare("SELECT series_id FROM series_episodes WHERE id=? LIMIT 1");
+    $st->execute([$id]);
+    $series_id = (int)($st->fetch(PDO::FETCH_ASSOC)['series_id'] ?? 0);
+    if ($series_id < 1) {
+      http_response_code(404);
+      exit('Episode not found');
+    }
+    $params = array_merge([$series_id], $pkg_ids);
+    $st = $pdo->prepare("SELECT 1 FROM package_series ps WHERE ps.series_id=? AND ps.package_id IN ($in) LIMIT 1");
+    $st->execute($params);
+    if (!$st->fetch()) {
+      audit_log('package_block', (int)$user['id'], ['type'=>'series','series_id'=>$series_id,'episode_id'=>$id]);
+      telemetry_reason('package_block', ['type'=>'series','series_id'=>$series_id,'episode_id'=>$id]);
+      http_response_code(403);
+      exit("Not in your package");
+    }
   }
 }
 
@@ -159,6 +212,7 @@ $active_devices = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
 
 if ($active_devices > $max_streams) {
   audit_log('max_connections', (int)$user['id'], ['channel_id'=>$id,'active'=>$active_devices,'max'=>$max_streams]);
+  telemetry_reason('max_connections', ['active'=>$active_devices,'max'=>$max_streams,'id'=>$id]);
   http_response_code(429);
   header("Content-Type: application/json; charset=utf-8");
   echo json_encode(["error"=>"max_connections_reached","active"=>$active_devices,"max"=>$max_streams]);
@@ -181,6 +235,7 @@ if ($max_ip_changes > 0 && $max_ip_window > 0) {
   $ip_count = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
   if ($ip_count > $max_ip_changes) {
     audit_log('restream_detected', (int)$user['id'], ['channel_id'=>$id,'ip_count'=>$ip_count,'window'=>$max_ip_window]);
+    telemetry_reason('restream_detected', ['ip_count'=>$ip_count,'window'=>$max_ip_window,'id'=>$id]);
     http_response_code(403);
     exit("Restream detected");
   }
@@ -288,6 +343,7 @@ foreach ($sources as $src) {
 }
 
 if ($chosen === '') {
+  telemetry_reason('no_upstream');
   http_response_code(502);
   exit("No upstream");
 }

@@ -17,7 +17,18 @@ function db(): PDO {
   $charset = $db['charset'] ?? 'utf8mb4';
 
   if (!$name || !$user) {
-    throw new RuntimeException("DB config missing name/user. Check config.php.");
+    // Friendly installer redirect if not configured yet.
+    if (PHP_SAPI !== 'cli') {
+      $path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH) ?: '';
+      if (!str_starts_with($path, '/install')) {
+        $script = $_SERVER['SCRIPT_NAME'] ?? '/index.php';
+        $base   = rtrim(str_replace('\\', '/', dirname($script)), '/');
+        $dest   = ($base ? $base : '') . '/install/';
+        header('Location: ' . $dest);
+        exit;
+      }
+    }
+    throw new RuntimeException("DB config missing name/user. Run /install or set config.local.php.");
   }
 
   $dsn = "mysql:host={$host};dbname={$name};charset={$charset}";

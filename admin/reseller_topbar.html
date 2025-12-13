@@ -51,6 +51,32 @@
         }
       })();
     </script>
+  
+    <script>
+      // Sidebar accordion: keep only one group open at a time
+      (function iptvAccordion(){
+        var nav = document.getElementById('sideNav');
+        if(!nav) return;
+        var groups = Array.prototype.slice.call(nav.querySelectorAll('details.nav-group'));
+        function closeOthers(openEl){
+          groups.forEach(function(g){
+            if(g !== openEl) g.removeAttribute('open');
+          });
+        }
+        groups.forEach(function(g){
+          g.addEventListener('toggle', function(){
+            if(g.open) closeOthers(g);
+          });
+          var s = g.querySelector('summary');
+          if(s){
+            s.addEventListener('click', function(){
+              setTimeout(function(){ if(g.open) closeOthers(g); }, 0);
+            });
+          }
+        });
+      })();
+    </script>
+
   </aside>
 
   <main class="main">
