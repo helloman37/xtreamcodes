@@ -1,0 +1,71 @@
+##############################################
+# IPTV Panel Webroot .htaccess (Apache 2.4+)
+##############################################
+
+# Prevent content negotiation from breaking routes
+Options -MultiViews -Indexes
+
+# Basic hardening
+ServerSignature Off
+
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# --- IMPORTANT: enable rewrites ---
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /
+
+# (Optional) Force HTTPS
+# RewriteCond %{HTTPS} !=on
+# RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+
+# -------------------------------
+# Block access to sensitive files
+# -------------------------------
+RewriteRule (^|/)\.(?!well-known/) - [F,L]  # block dotfiles except .well-known
+RewriteRule \.(?:env|ini|log|bak|old|swp|sql|sqlite|gz|zip|tar|tgz)$ - [F,L,NC]
+RewriteRule ^(?:config|configs|includes|inc)/.*\.(?:php|ini|json|yml|yaml)$ - [F,L,NC]
+
+# -------------------------------
+# LIVE HLS routes (fixes your 404)
+# Example:
+# /live/test/<hash>/1.m3u8?exp=...
+# -------------------------------
+# If your live.php parses REQUEST_URI itself (common), do NOT add query mapping:
+RewriteRule ^live/.*$ live.php [QSA,L]
+
+# -------------------------------
+# Segment routes
+# Example:
+# /seg/test/<token>/123?url=...
+# -------------------------------
+RewriteRule ^seg/([^/]+)/([^/]+)/([0-9]+)$ stream/segment.php?u=$1&token=$2&id=$3 [QSA,L]
+
+# -------------------------------
+# OPTIONAL: If you also serve VOD similarly, uncomment if needed
+# RewriteRule ^movie/.*$ movie.php [QSA,L]
+# RewriteRule ^series/.*$ series.php [QSA,L]
+# -------------------------------
+
+</IfModule>
+
+# -------------------------------
+# MIME types for HLS
+# (Apache usually knows these, but some installs need help)
+# -------------------------------
+AddType application/vnd.apple.mpegurl .m3u8
+AddType video/MP2T .ts
+
+# -------------------------------
+# Cache policy for live playlists/segments (optional)
+# -------------------------------
+<IfModule mod_headers.c>
+  <FilesMatch "\.(m3u8|ts)$">
+    Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+    Header set Pragma "no-cache"
+  </FilesMatch>
+</IfModule>
