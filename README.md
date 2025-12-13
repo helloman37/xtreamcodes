@@ -39,7 +39,49 @@ This repo has been upgraded heavily versus the early “basic panel” version:
   - `/get.php` (not `/panel/get.php`)
   - `/xmltv.php` (not `/panel/xmltv.php`)
 
-### 🔒 Abuse Controls (Ban System)
+### ✅ Reseller Credits Display (Header)
+Resellers can now always see exactly how many credits they have:
+
+- The top header “Credits” label is now a **live badge**:
+  - `Credits: 123`
+  - Indicator dot is **green** when credits > 0
+  - Indicator dot is **red** when credits = 0
+- Implemented by injecting the reseller’s credit balance into the existing HTML topbar template.
+
+> Note: Admins don’t “have” credits — this display is intended for reseller-facing pages.
+
+### ✅ Fail Videos (System → Fail Videos)
+Admins can now set custom videos that play when a user fails authentication or is blocked — instead of returning plain text like **“Invalid credentials”**.
+
+- Admin page: **System → Fail Videos**
+- Supported formats (any URL ending with):
+  - `.mp4`
+  - `.m3u8`
+  - `.ts`
+- Enforced across common entrypoints:
+  - `get.php`
+  - Stream endpoints (e.g. `/live/...`, `/movie/...`, `/series/...`)
+  - Segment-based streaming can use **`.ts`** fail videos for best compatibility
+
+How it works:
+- When a request fails (invalid login / expired / banned / limit reached), the server returns a **302 redirect** to your configured fail video URL.
+- If no fail video is configured, the system falls back to the original behavior (plain error response).
+
+---
+
+## Features (Current)
+
+### 🔐 Admin Area (`/admin`)
+- Admin login/logout
+- Dashboard stats:
+  - Total channels
+  - Online/offline/unchecked health stats
+  - Active users/resellers
+  - Recent stream checks
+
+> Default admin from early SQL files may exist in older installs. **Change it immediately.**
+
+### 🧾 Abuse Controls (Ban System)
 - Ban by **IP** and/or **username/account** for abuse.
 - Enforced across:
   - `player_api.php`
@@ -64,26 +106,6 @@ This repo has been upgraded heavily versus the early “basic panel” version:
 New **Billing → Reports** page:
 - **Monthly revenue grid** (up to last 12 months)
 - “Up for renewal” sections (users nearing expiry / renewal windows)
-
-### 🧭 Admin UI Improvements
-- Sidebar updated to **accordion behavior**:
-  - Opening a new category closes the previous one
-  - Active page auto-opens the correct section
-- Admin pages kept consistent with dashboard styling.
-
----
-
-## Features (Current)
-
-### 🔐 Admin Area (`/admin`)
-- Admin login/logout
-- Dashboard stats:
-  - Total channels
-  - Online/offline/unchecked health stats
-  - Active users/resellers
-  - Recent stream checks
-
-> Default admin from early SQL files may exist in older installs. **Change it immediately.**
 
 ### 📺 Channel Management
 - Add / edit / delete channels
@@ -137,6 +159,14 @@ If you want `/live/...` and `/seg/...` to work, enable the provided Apache/Nginx
 */10 * * * * php /path/to/scripts/stream_probe.php --limit=400 >/dev/null 2>&1
 0 */6 * * * php /path/to/scripts/epg_import.php --flush=0 >/dev/null 2>&1
 ```
+
+---
+
+## Notes on Fail Videos (Compatibility Tips)
+
+- **`.m3u8`** is the best choice for most IPTV apps (especially for Live-style playback).
+- **`.mp4`** works well for many apps but not all “live” players.
+- **`.ts`** is the safest for **segment endpoints** because those requests often expect raw transport stream bytes.
 
 ---
 
