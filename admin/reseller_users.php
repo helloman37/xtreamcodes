@@ -6,6 +6,11 @@ require_reseller();
 
 $pdo = db();
 $reseller_id = (int)$_SESSION['reseller_id'];
+$resellerStmt = $pdo->prepare("SELECT * FROM resellers WHERE id=? AND status='active' LIMIT 1");
+$resellerStmt->execute([$reseller_id]);
+$reseller = $resellerStmt->fetch(PDO::FETCH_ASSOC);
+if (!$reseller) { flash_set('Reseller not found or suspended.', 'error'); header('Location: reseller_signin.php'); exit; }
+
 $plans = $pdo->query("SELECT * FROM plans ORDER BY price ASC")->fetchAll(PDO::FETCH_ASSOC);
 
 $edit_id = isset($_GET['edit']) ? (int)$_GET['edit'] : 0;
@@ -15,7 +20,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_user'])) {
   $status = ($_POST['status'] ?? 'active') === 'suspended' ? 'suspended' : 'active';
   $allow_adult = !empty($_POST['allow_adult']) ? 1 : 0;
   $plan_id = (int)($_POST['plan_id'] ?? 0);
-  $unlimited = !empty($_POST['unlimited']) ? 1 : 0;
+  $unlimited = 0; // resellers cannot set unlimited
   $new_pass = trim($_POST['new_password'] ?? '');
 
   // verify ownership
@@ -45,9 +50,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_user'])) {
       $plan = $planStmt->fetch(PDO::FETCH_ASSOC);
       if (!$plan) throw new Exception("Invalid plan.");
 
+      $cost = (int)($plan['reseller_credits_cost'] ?? 1);
+      if ($cost < 0) $cost = 0;
+      if (empty($reseller['unlimited']) && $cost > 0 && (int)$reseller['credits'] < $cost) {
+        throw new Exception("Not enough credits (need {$cost}).");
+      }
+
       $starts_at = date("Y-m-d H:i:s");
       $ends_at = null;
       $duration_days = (int)($plan['duration_days'] ?? 0);
+      if (!empty($reseller['max_days_per_sub']) && $duration_days > (int)$reseller['max_days_per_sub']) {
+        $duration_days = (int)$reseller['max_days_per_sub'];
+      }
       if (!$unlimited && $duration_days > 0) {
         $ends_at = date("Y-m-d H:i:s", strtotime("+{$duration_days} days"));
       }
@@ -57,6 +71,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_user'])) {
 
       $sStmt = $pdo->prepare("INSERT INTO subscriptions (user_id, plan_id, starts_at, ends_at, status) VALUES (?,?,?,?,?)");
       $sStmt->execute([$user_id, $plan_id, $starts_at, $ends_at, 'active']);
+
+      if (empty($reseller['unlimited']) && $cost > 0) {
+        $cStmt = $pdo->prepare("UPDATE resellers SET credits = credits - ? WHERE id=? AND credits >= ?");
+        $cStmt->execute([$cost, $reseller_id, $cost]);
+        if ($cStmt->rowCount() !== 1) throw new Exception('Credit deduction failed.');
+        // refresh local reseller credits
+        $reseller['credits'] = (int)$reseller['credits'] - $cost;
+      }
     }
 
     $pdo->commit();

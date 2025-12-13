@@ -1,21 +1,19 @@
 <?php
-require_once __DIR__ . '/../db.php';
-require_once __DIR__ . '/../helpers.php';
+require_once __DIR__ . '/../api_common.php';
 
 $config   = require __DIR__ . '/../config.php';
 $base_url = rtrim($config['base_url'], '/');
-$dev_win  = (int)($config['device_window'] ?? 120);
-$max_ip_changes = (int)($config['max_ip_changes'] ?? 3);
-$max_ip_window  = (int)($config['max_ip_window'] ?? 600);
 
 header("Access-Control-Allow-Origin: *");
 
-$u  = $_GET['u'] ?? '';
-$p  = $_GET['p'] ?? '';
+$u  = (string)($_GET['u'] ?? '');
+$p  = (string)($_GET['p'] ?? '');
 $id = (int)($_GET['id'] ?? 0);
+$type = strtolower((string)($_GET['type'] ?? 'live'));
+if (!in_array($type, ['live','movie','episode'], true)) { http_response_code(400); exit('Bad type'); }
 
 $exp   = (int)($_GET['exp'] ?? 0);
-$token = $_GET['token'] ?? '';
+$token = (string)($_GET['token'] ?? '');
 
 if ($u === '' || $id < 1) {
   http_response_code(400);
@@ -23,109 +21,280 @@ if ($u === '' || $id < 1) {
 }
 
 $pdo = db();
+ensure_categories($pdo);
+
+$ip = get_client_ip();
+$ua = substr($_SERVER['HTTP_USER_AGENT'] ?? 'unknown', 0, 250);
+$device_fp = get_device_fingerprint();
+if ($device_fp==='' && strict_device_id_enabled()) {
+  http_response_code(403);
+  exit('device_id_required');
+}
 
 /* user */
 $st = $pdo->prepare("SELECT * FROM users WHERE username=? AND status='active' LIMIT 1");
 $st->execute([$u]);
-$user = $st->fetch();
-if (!$user) { http_response_code(401); exit("Invalid user"); }
+$user = $st->fetch(PDO::FETCH_ASSOC);
+if (!$user) {
+  http_response_code(401);
+  exit("Invalid user");
+}
 
-/* allow token OR password */
-$token_ok = ($token && $exp && verify_token($u, $id, $exp, $token));
+/* token OR password */
+$token_ok = ($token && $exp && verify_token($u, $id, $exp, $token, $type));
 $pass_ok  = ($p !== '' && password_verify($p, $user['password_hash']));
 if (!$token_ok && !$pass_ok) {
+  audit_log('stream_auth_fail', (int)$user['id'], ['channel_id'=>$id]);
   http_response_code(401);
   exit("Invalid credentials");
 }
 
-/* sub + plan */
+// Policy: IP allow/deny
+if (!ip_allowed($ip, $user['ip_allowlist'] ?? null, $user['ip_denylist'] ?? null)) {
+  audit_log('ip_block', (int)$user['id'], ['ip'=>$ip,'channel_id'=>$id]);
+  http_response_code(403);
+  exit("IP not allowed");
+}
+
+/* active sub + plan */
 $st = $pdo->prepare("
-  SELECT s.*, p.max_streams
+  SELECT s.*, p.max_streams, p.max_devices
   FROM subscriptions s
   JOIN plans p ON p.id=s.plan_id
   WHERE s.user_id=? AND s.status='active' AND (s.ends_at IS NULL OR s.ends_at>NOW())
   ORDER BY s.ends_at DESC LIMIT 1
 ");
-$st->execute([$user['id']]);
-$sub = $st->fetch();
-if (!$sub) { http_response_code(403); exit("No active subscription"); }
+$st->execute([(int)$user['id']]);
+$sub = $st->fetch(PDO::FETCH_ASSOC);
+if (!$sub) {
+  http_response_code(403);
+  exit("No active subscription");
+}
 $max_streams = (int)$sub['max_streams'];
+$max_devices = (int)($sub['max_devices'] ?? 2);
 
-/* session tracking */
-$ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
-$ua = substr($_SERVER['HTTP_USER_AGENT'] ?? 'unknown', 0, 250);
+// Device lock (optional): binds first-seen device fingerprint to the account
+try {
+  if ($device_fp !== '') {
+  $pdo->prepare("
+    INSERT INTO user_devices (user_id, fingerprint, last_seen, last_ip)
+    VALUES (?,?,NOW(),?)
+    ON DUPLICATE KEY UPDATE last_seen=NOW(), last_ip=VALUES(last_ip)
+  ")->execute([(int)$user['id'], $device_fp, $ip]);
+  }
 
-$pdo->prepare("
-  INSERT INTO stream_sessions (user_id, channel_id, ip, user_agent, last_seen)
-  VALUES (?,?,?,?, NOW())
-")->execute([$user['id'], $id, $ip, $ua]);
+  if (!empty($user['device_lock'])) {
+    $st = $pdo->prepare("SELECT fingerprint FROM user_devices WHERE user_id=? ORDER BY first_seen ASC LIMIT 1");
+    $st->execute([(int)$user['id']]);
+    $primary = (string)($st->fetch(PDO::FETCH_ASSOC)['fingerprint'] ?? '');
+    if ($primary && $device_fp!=='' && !hash_equals($primary, $device_fp)) {
+      audit_log('device_lock_block', (int)$user['id'], ['ip'=>$ip,'channel_id'=>$id]);
+      http_response_code(403);
+      exit("Device locked");
+    }
+  }
+} catch (Throwable $e) {
+  // ignore
+}
 
-/* device limit */
+// Hard max devices (based on plan)
+if ($max_devices > 0 && $device_fp !== '') {
+  $st = $pdo->prepare("SELECT COUNT(*) c FROM user_devices WHERE user_id=?");
+  $st->execute([(int)$user['id']]);
+  $dev_count = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
+  if ($dev_count > $max_devices) {
+    audit_log('max_devices', (int)$user['id'], ['count'=>$dev_count,'max'=>$max_devices]);
+    http_response_code(403);
+    exit('max_devices_reached');
+  }
+}
+
+/* package/bouquet enforcement (live only) */
+$pkg_ids = user_package_ids($pdo, (int)$user['id']);
+if ($type !== 'live') { $pkg_ids = []; }
+
+if ($pkg_ids) {
+  $in = implode(',', array_fill(0, count($pkg_ids), '?'));
+  $params = array_merge([$id], $pkg_ids);
+  $st = $pdo->prepare("SELECT 1 FROM package_channels pc WHERE pc.channel_id=? AND pc.package_id IN ($in) LIMIT 1");
+  $st->execute($params);
+  if (!$st->fetch()) {
+    audit_log('package_block', (int)$user['id'], ['channel_id'=>$id]);
+    http_response_code(403);
+    exit("Not in your package");
+  }
+}
+
+/* cleanup old sessions */
+$pdo->exec("DELETE FROM stream_sessions WHERE last_seen < (NOW() - INTERVAL 2 DAY)");
+
+/* session tracking + token rotation */
+$session_token = random_hex_token(16);
+try {
+  $pdo->prepare("
+    INSERT INTO stream_sessions (user_id, channel_id, item_id, stream_type, ip, user_agent, device_fp, session_token, last_seen)
+    VALUES (?,?,?,?,?,?,?,?, NOW())
+  ")->execute([(int)$user['id'], ($type==='live' ? $id : null), $id, $type, $ip, $ua, $device_fp, $session_token]);
+} catch (Throwable $e) {
+  // Backward compatible insert
+  $pdo->prepare("
+    INSERT INTO stream_sessions (user_id, channel_id, ip, user_agent, device_fp, last_seen)
+    VALUES (?,?,?,?,?, NOW())
+  ")->execute([(int)$user['id'], $id, $ip, $ua, $device_fp]);
+}
+
+/* max connections (hard) */
+$dev_win  = (int)($config['device_window'] ?? 120);
 $st = $pdo->prepare("
   SELECT COUNT(*) AS c FROM (
-    SELECT DISTINCT ip, user_agent
+    SELECT DISTINCT IFNULL(device_fp,''), ip, user_agent
     FROM stream_sessions
-    WHERE user_id=? 
+    WHERE user_id=?
+      AND (killed_at IS NULL OR killed_at='0000-00-00 00:00:00')
       AND last_seen > (NOW() - INTERVAL ? SECOND)
   ) x
 ");
-$st->execute([$user['id'], $dev_win]);
-$active_devices = (int)$st->fetch()['c'];
+$st->execute([(int)$user['id'], $dev_win]);
+$active_devices = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
 
 if ($active_devices > $max_streams) {
+  audit_log('max_connections', (int)$user['id'], ['channel_id'=>$id,'active'=>$active_devices,'max'=>$max_streams]);
   http_response_code(429);
-  exit("Device limit reached");
+  header("Content-Type: application/json; charset=utf-8");
+  echo json_encode(["error"=>"max_connections_reached","active"=>$active_devices,"max"=>$max_streams]);
+  exit;
 }
 
-/* anti-restream: too many IP swaps */
-$st = $pdo->prepare("
-  SELECT COUNT(DISTINCT ip) AS c
-  FROM stream_sessions
-  WHERE user_id=? 
-    AND last_seen > (NOW() - INTERVAL ? SECOND)
-");
-$st->execute([$user['id'], $max_ip_window]);
-$ip_count = (int)$st->fetch()['c'];
+/* anti-restream: too many IP swaps in window */
+$max_ip_changes = (int)($user['max_ip_changes'] ?? ($config['max_ip_changes'] ?? 3));
+$max_ip_window  = (int)($user['max_ip_window']  ?? ($config['max_ip_window']  ?? 600));
 
-if ($ip_count > $max_ip_changes) {
-  http_response_code(403);
-  exit("Restream detected");
+if ($max_ip_changes > 0 && $max_ip_window > 0) {
+  $st = $pdo->prepare("
+    SELECT COUNT(DISTINCT ip) AS c
+    FROM stream_sessions
+    WHERE user_id=?
+      AND (killed_at IS NULL OR killed_at='0000-00-00 00:00:00')
+      AND last_seen > (NOW() - INTERVAL ? SECOND)
+  ");
+  $st->execute([(int)$user['id'], $max_ip_window]);
+  $ip_count = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
+  if ($ip_count > $max_ip_changes) {
+    audit_log('restream_detected', (int)$user['id'], ['channel_id'=>$id,'ip_count'=>$ip_count,'window'=>$max_ip_window]);
+    http_response_code(403);
+    exit("Restream detected");
+  }
 }
 
+/* stream item lookup */
+$channel = null;
+if ($type === 'live') {
+  $st = $pdo->prepare("SELECT id,stream_url,sources_json,direct_play, IFNULL(is_adult,0) AS is_adult FROM channels WHERE id=?");
+  $st->execute([$id]);
+  $channel = $st->fetch(PDO::FETCH_ASSOC);
+  if (!$channel) { http_response_code(404); exit("Channel not found"); }
+  if (empty($user["allow_adult"]) && (int)$channel["is_adult"] === 1) {
+    http_response_code(403); exit("Adult content not allowed");
+  }
+} elseif ($type === 'movie') {
+  $st = $pdo->prepare("SELECT id, stream_url, NULL AS sources_json, 0 AS direct_play, IFNULL(is_adult,0) AS is_adult, container_ext, poster_url AS tvg_logo FROM movies WHERE id=?");
+  $st->execute([$id]);
+  $channel = $st->fetch(PDO::FETCH_ASSOC);
+  if (!$channel) { http_response_code(404); exit("Movie not found"); }
+  if (empty($user["allow_adult"]) && (int)$channel["is_adult"] === 1) {
+    http_response_code(403); exit("Adult content not allowed");
+  }
+} else { // episode
+  $st = $pdo->prepare("SELECT e.id, e.stream_url, NULL AS sources_json, 0 AS direct_play, IFNULL(s.is_adult,0) AS is_adult, e.container_ext
+                      FROM series_episodes e
+                      JOIN series s ON s.id=e.series_id
+                      WHERE e.id=?");
+  $st->execute([$id]);
+  $channel = $st->fetch(PDO::FETCH_ASSOC);
+  if (!$channel) { http_response_code(404); exit("Episode not found"); }
+  if (empty($user["allow_adult"]) && (int)$channel["is_adult"] === 1) {
+    http_response_code(403); exit("Adult content not allowed");
+  }
+}
+
+/* sources (failover) */
+$sources = [];
+if (!empty($channel['sources_json'])) {
+  $j = json_decode($channel['sources_json'], true);
+  if (is_array($j)) $sources = $j;
+}
+if (!$sources) {
+  $raw = (string)$channel['stream_url'];
+  if (strpos($raw, '||') !== false) {
+    $sources = array_values(array_filter(array_map('trim', explode('||', $raw))));
+  } else {
+    $sources = [$raw];
+  }
+}
+
+// direct play bypass
+if (!empty($channel['direct_play'])) {
+  header("Location: ".$sources[0], true, 302);
+  exit;
+}
 
 /* ---------- upstream request headers ---------- */
-$client_ua = $_SERVER['HTTP_USER_AGENT'] ?? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
-$up_headers = [
-  'Accept: */*',
-  'Connection: keep-alive'
-];
-// forward browser/app headers if present (many CDNs require these)
+$client_ua = $_SERVER['HTTP_USER_AGENT'] ?? 'Mozilla/5.0';
+$up_headers = ['Accept: */*', 'Connection: keep-alive'];
 if (!empty($_SERVER['HTTP_REFERER'])) $up_headers[] = 'Referer: '.$_SERVER['HTTP_REFERER'];
 if (!empty($_SERVER['HTTP_ORIGIN']))  $up_headers[] = 'Origin: '.$_SERVER['HTTP_ORIGIN'];
 if (!empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])) $up_headers[] = 'Accept-Language: '.$_SERVER['HTTP_ACCEPT_LANGUAGE'];
 
-/* channel source */
-$st = $pdo->prepare("SELECT stream_url, direct_play, IFNULL(is_adult,0) AS is_adult FROM channels WHERE id=?");
-$st->execute([$id]);
-$channel = $st->fetch();
-if (!$channel) { http_response_code(404); exit("Channel not found"); }
-if (empty($user["allow_adult"]) && (int)$channel["is_adult"] === 1) {
-  http_response_code(403); exit("Adult content not allowed");
+function fetch_url(string $url, array $headers, string $ua, int $timeout=20): array {
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [
+    CURLOPT_FOLLOWLOCATION => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_SSL_VERIFYPEER => false,
+    CURLOPT_SSL_VERIFYHOST => false,
+    CURLOPT_ENCODING => "",
+    CURLOPT_USERAGENT => $ua,
+    CURLOPT_HTTPHEADER => $headers,
+    CURLOPT_TIMEOUT => $timeout
+  ]);
+  $body = curl_exec($ch);
+  $code = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+  $eff  = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+  $err  = curl_error($ch);
+  curl_close($ch);
+  return ['body'=>$body, 'code'=>$code, 'effective'=>$eff ?: $url, 'error'=>$err];
 }
 
-$source = $channel['stream_url'];
+/* choose working source (failover) */
+$chosen = $sources[0] ?? '';
+$playlist = null;
+$effective = $chosen;
+$chosen_code = 0;
 
-// direct play bypass (for stubborn legal FAST feeds)
-if (!empty($channel['direct_play'])) {
-  header("Location: ".$source, true, 302);
-  exit;
+foreach ($sources as $src) {
+  if (!$src) continue;
+  if (!preg_match('/\.m3u8(\?|$)/i', $src)) {
+    $chosen = $src;
+    break;
+  }
+  $r = fetch_url($src, $up_headers, $client_ua, 20);
+  $chosen_code = (int)$r['code'];
+  if ($r['body'] !== false && trim((string)$r['body']) !== '' && $chosen_code >= 200 && $chosen_code < 500) {
+    $chosen = $src;
+    $playlist = (string)$r['body'];
+    $effective = (string)$r['effective'];
+    break;
+  }
 }
 
+if ($chosen === '') {
+  http_response_code(502);
+  exit("No upstream");
+}
 
-/* if not HLS, redirect */
-/* if not HLS, proxy bytes to keep URL hidden */
-if (!preg_match('/\.m3u8(\?|$)/i', $source)) {
-  $ch = curl_init($source);
+/* if not HLS: proxy bytes to keep URL hidden (or redirect if upstream blocks) */
+if (!preg_match('/\.m3u8(\?|$)/i', $chosen)) {
+  $ch = curl_init($chosen);
   curl_setopt_array($ch, [
     CURLOPT_FOLLOWLOCATION => true,
     CURLOPT_RETURNTRANSFER => false,
@@ -138,43 +307,44 @@ if (!preg_match('/\.m3u8(\?|$)/i', $source)) {
       $len = strlen($header);
       if (stripos($header, 'Content-Type:') === 0) header(trim($header));
       if (stripos($header, 'Content-Length:') === 0) header(trim($header));
+      if (stripos($header, 'Accept-Ranges:') === 0) header(trim($header));
       return $len;
     }
   ]);
+  // forward Range for VOD/MP4
+  if (!empty($_SERVER['HTTP_RANGE'])) {
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array_merge($up_headers, ['Range: '.$_SERVER['HTTP_RANGE']]));
+  }
   curl_exec($ch);
   curl_close($ch);
   exit;
 }
 
-/* ---------- fetch upstream playlist (with compatibility headers) ---------- */
-$ch = curl_init($source);
-curl_setopt_array($ch, [
-  CURLOPT_FOLLOWLOCATION => true,
-  CURLOPT_RETURNTRANSFER => true,
-  CURLOPT_SSL_VERIFYPEER => false,
-  CURLOPT_SSL_VERIFYHOST => false,
-  CURLOPT_ENCODING => "", // accept gzip/deflate
-  CURLOPT_USERAGENT => $client_ua,
-  CURLOPT_HTTPHEADER => $up_headers,
-  CURLOPT_TIMEOUT => 20
-]);
-$playlist  = curl_exec($ch);
-$final_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-curl_close($ch);
-
-if ($playlist === false || trim($playlist) === '') {
-  // Upstream blocked proxy fetch (often IP/geo or header gated).
-  // Fallback to direct redirect so playback still works,
-  // while the playlist continues to show YOUR URL.
-  header("Location: ".$source, true, 302);
-  exit;
+// If we didn't prefetch playlist above, fetch now
+if ($playlist === null) {
+  $r = fetch_url($chosen, $up_headers, $client_ua, 20);
+  $playlist = (string)($r['body'] ?? '');
+  $effective = (string)($r['effective'] ?? $chosen);
+  if (trim($playlist) === '') {
+    header("Location: ".$chosen, true, 302);
+    exit;
+  }
 }
 
 /* base for relative URLs */
-$base_dir = preg_replace('~/[^/]*$~', '/', $final_url);
-$lines = preg_split("/\\r\\n|\\n|\\r/", $playlist);
+$base_dir = preg_replace('~/[^/]*$~', '/', $effective);
+$lines = preg_split("/\r\n|\n|\r/", $playlist);
 
 header("Content-Type: application/vnd.apple.mpegurl; charset=utf-8");
+
+// Build segment rewrite base
+if ($token_ok) {
+  $seg_base = $base_url . "/seg/" . rawurlencode($u) . "/" . rawurlencode($token) . "/" . $id;
+  $seg_tail = "exp=" . $exp . "&type=" . rawurlencode($type) . "&st=" . rawurlencode($session_token);
+} else {
+  $seg_base = $base_url . "/seg/" . rawurlencode($u) . "/" . rawurlencode($p) . "/" . $id;
+  $seg_tail = "type=" . rawurlencode($type) . "&st=" . rawurlencode($session_token);
+}
 
 $out = [];
 foreach ($lines as $line) {
@@ -185,20 +355,15 @@ foreach ($lines as $line) {
     continue;
   }
 
-  // absolute upstream URL
   if (!preg_match('~^https?://~i', $trim)) {
     $trim = $base_dir . ltrim($trim, '/');
   }
 
-  // rewrite through YOUR domain segment proxy (no leak)
-  $seg = $base_url."/seg/".rawurlencode($u)."/".rawurlencode($p ?: '')."/".$id
-       ."?url=".rawurlencode($trim);
+  $q = "url=" . rawurlencode($trim);
+  if ($seg_tail !== '') $q .= "&" . $seg_tail;
+  if ($token_ok) $q .= "&token=" . rawurlencode($token);
 
-  if ($token_ok) {
-    $seg .= "&exp=".$exp."&token=".$token;
-  }
-
-  $out[] = $seg;
+  $out[] = $seg_base . "?" . $q;
 }
 
-echo implode("\\n", $out);
+echo implode("\n", $out);

@@ -20,6 +20,28 @@ function flash_show() {
   }
 }
 
+// --- CSRF helpers (admin forms) ---
+function csrf_token(): string {
+  if (session_status() !== PHP_SESSION_ACTIVE) session_start();
+  if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+  }
+  return $_SESSION['csrf_token'];
+}
+function csrf_input(): string {
+  return '<input type="hidden" name="csrf_token" value="'.e(csrf_token()).'">';
+}
+function csrf_validate(): void {
+  if (session_status() !== PHP_SESSION_ACTIVE) session_start();
+  $sent = $_POST['csrf_token'] ?? '';
+  $good = $_SESSION['csrf_token'] ?? '';
+  if (!$sent || !$good || !hash_equals($good, $sent)) {
+    http_response_code(403);
+    die('Forbidden (CSRF)');
+  }
+}
+// --- end CSRF helpers ---
+
 function parse_m3u(string $content): array {
   $lines = preg_split("/\r\n|\n|\r/", $content);
   $channels = [];
@@ -81,18 +103,165 @@ function check_stream_url(string $url, int $timeout=8): array {
   return ['code'=>$code, 'works'=>$works, 'error'=>$err];
 }
 
-/* ---------- TOKENS ---------- */
+/* ---------- SECURITY + LOGGING HELPERS ---------- */
 
-function make_token(string $username, int $channel_id, int $exp): string {
+function get_client_ip(): string {
+  return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+}
+
+function strict_device_id_enabled(): bool {
+  try {
+    $config = require __DIR__ . '/config.php';
+    return !empty($config['strict_device_id']);
+  } catch (Throwable $e) {
+    return false;
+  }
+}
+
+function get_device_fingerprint(): string {
+  // Prefer explicit device id (apps can send ?device_id= or X-Device-ID)
+  $dev = trim($_GET['device_id'] ?? ($_SERVER['HTTP_X_DEVICE_ID'] ?? ''));
+
+  if ($dev !== '') {
+    return substr(hash('sha256', $dev), 0, 32);
+  }
+
+  // If strict mode is on, do NOT fall back to UA (forces real device_id from your app)
+  if (strict_device_id_enabled()) {
+    return '';
+  }
+
+  $ua = $_SERVER['HTTP_USER_AGENT'] ?? 'unknown';
+  $lang = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';
+  return substr(hash('sha256', $ua.'|'.$lang), 0, 32);
+}
+
+
+function rate_limit(string $key, int $limit, int $window_seconds): bool {
+  // Returns true if allowed, false if rate-limited.
+  $dir = __DIR__ . '/tmp/ratelimit';
+  if (!is_dir($dir)) @mkdir($dir, 0755, true);
+
+  $f = $dir . '/' . preg_replace('/[^a-zA-Z0-9_\-\.]/', '_', $key) . '.json';
+  $now = time();
+
+  $data = ['t' => $now, 'hits' => []];
+  if (is_file($f)) {
+    $raw = @file_get_contents($f);
+    $j = $raw ? json_decode($raw, true) : null;
+    if (is_array($j)) $data = $j;
+  }
+
+  // prune
+  $hits = array_values(array_filter($data['hits'] ?? [], fn($t) => ($t >= $now - $window_seconds)));
+  if (count($hits) >= $limit) {
+    $data['hits'] = $hits;
+    @file_put_contents($f, json_encode($data));
+    return false;
+  }
+  $hits[] = $now;
+  $data['hits'] = $hits;
+  @file_put_contents($f, json_encode($data));
+  return true;
+}
+
+function parse_cidr_list(?string $txt): array {
+  if (!$txt) return [];
+  $parts = preg_split('/[\s,;]+/', trim($txt));
+  return array_values(array_filter(array_map('trim', $parts)));
+}
+
+function ip_in_cidr(string $ip, string $cidr): bool {
+  if (strpos($cidr, '/') === false) {
+    return $ip === $cidr;
+  }
+  [$subnet, $mask] = explode('/', $cidr, 2);
+  $mask = (int)$mask;
+  if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && filter_var($subnet, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+    $ip_long = ip2long($ip);
+    $sub_long = ip2long($subnet);
+    $mask_long = -1 << (32 - $mask);
+    return ($ip_long & $mask_long) === ($sub_long & $mask_long);
+  }
+  // IPv6 CIDR not supported in this minimal helper
+  return false;
+}
+
+function ip_allowed(string $ip, ?string $allowlist, ?string $denylist): bool {
+  $deny = parse_cidr_list($denylist);
+  foreach ($deny as $cidr) {
+    if (ip_in_cidr($ip, $cidr)) return false;
+  }
+  $allow = parse_cidr_list($allowlist);
+  if (!$allow) return true;
+  foreach ($allow as $cidr) {
+    if (ip_in_cidr($ip, $cidr)) return true;
+  }
+  return false;
+}
+
+function audit_log(string $event, ?int $user_id=null, array $meta=[], ?int $reseller_id=null): void {
+  try {
+    $pdo = db();
+    $pdo->prepare('INSERT INTO audit_logs (user_id,reseller_id,ip,event,meta_json) VALUES (?,?,?,?,?)')
+        ->execute([$user_id, $reseller_id, get_client_ip(), $event, $meta ? json_encode($meta, JSON_UNESCAPED_SLASHES) : null]);
+  } catch (Throwable $e) {
+    // ignore
+  }
+
+  // Optional webhook
+  try {
+    $config = require __DIR__ . '/config.php';
+    $hook = $config['webhook_url'] ?? '';
+    if ($hook) {
+      $payload = json_encode([
+        'event' => $event,
+        'user_id' => $user_id,
+        'reseller_id' => $reseller_id,
+        'ip' => get_client_ip(),
+        'meta' => $meta,
+        'ts' => time()
+      ], JSON_UNESCAPED_SLASHES);
+      $ch = curl_init($hook);
+      curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => $payload,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 3
+      ]);
+      @curl_exec($ch);
+      @curl_close($ch);
+    }
+  } catch (Throwable $e) {
+    // ignore
+  }
+}
+
+/* ---------- TOKENS ---------- */
+function random_hex_token(int $bytes=16): string {
+  return bin2hex(random_bytes($bytes));
+}
+
+
+function make_token(string $username, int $item_id, int $exp, string $type='live'): string {
   $config = require __DIR__ . '/config.php';
-  $data = $username . '|' . $channel_id . '|' . $exp;
+  $data = $type . '|' . $username . '|' . $item_id . '|' . $exp;
   return hash_hmac('sha256', $data, $config['secret_key']);
 }
 
-function verify_token(string $username, int $channel_id, int $exp, string $token): bool {
+function verify_token(string $username, int $item_id, int $exp, string $token, string $type='live'): bool {
   if ($exp < time()) return false;
-  $good = make_token($username, $channel_id, $exp);
-  return hash_equals($good, $token);
+
+  // New typed token
+  $good = make_token($username, $item_id, $exp, $type);
+  if (hash_equals($good, $token)) return true;
+
+  // Backward compatibility: old tokens were username|id|exp without type
+  $config = require __DIR__ . '/config.php';
+  $legacy_data = $username . '|' . $item_id . '|' . $exp;
+  $legacy = hash_hmac('sha256', $legacy_data, $config['secret_key']);
+  return hash_equals($legacy, $token);
 }
 
 // -------------------- Reseller auth (v10+) --------------------

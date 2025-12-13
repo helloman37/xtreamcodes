@@ -10,13 +10,15 @@ $pdo = db();
    CREATE PLAN
 ---------------------------- */
 if (isset($_POST['plan_create'])) {
-  $pdo->prepare("INSERT INTO plans (name, price, duration_days, max_streams)
-                 VALUES (?,?,?,?)")
+  $pdo->prepare("INSERT INTO plans (name, price, duration_days, max_streams, max_devices, reseller_credits_cost)
+                 VALUES (?,?,?,?,?,?)")
       ->execute([
-        trim($_POST['name']),
-        (float)$_POST['price'],
-        (int)$_POST['duration_days'],
-        (int)$_POST['max_streams']
+        trim($_POST['name'] ?? ''),
+        (float)($_POST['price'] ?? 0),
+        (int)($_POST['duration_days'] ?? 30),
+        (int)($_POST['max_streams'] ?? 1),
+        (int)($_POST['max_devices'] ?? 2),
+        (int)($_POST['reseller_credits_cost'] ?? 1)
       ]);
   flash_set("Plan created", "success");
   header("Location: plans_subs.php"); exit;
@@ -28,13 +30,15 @@ if (isset($_POST['plan_create'])) {
 if (isset($_POST['plan_update'])) {
   $plan_id = (int)$_POST['plan_id'];
   $pdo->prepare("UPDATE plans
-                 SET name=?, price=?, duration_days=?, max_streams=?
+                 SET name=?, price=?, duration_days=?, max_streams=?, max_devices=?, reseller_credits_cost=?
                  WHERE id=?")
       ->execute([
-        trim($_POST['name']),
-        (float)$_POST['price'],
-        (int)$_POST['duration_days'],
-        (int)$_POST['max_streams'],
+        trim($_POST['name'] ?? ''),
+        (float)($_POST['price'] ?? 0),
+        (int)($_POST['duration_days'] ?? 30),
+        (int)($_POST['max_streams'] ?? 1),
+        (int)($_POST['max_devices'] ?? 2),
+        (int)($_POST['reseller_credits_cost'] ?? 1),
         $plan_id
       ]);
 
@@ -69,9 +73,14 @@ if (isset($_POST['sub_create'])) {
   }
 
   $starts = new DateTime();
-  $ends   = (new DateTime())->modify("+" . (int)$plan['duration_days'] . " days");
-
-  $pdo->prepare("INSERT INTO subscriptions (user_id, plan_id, starts_at, ends_at, status)
+  $unlimited = isset($_POST['unlimited']) && (string)$_POST['unlimited'] === '1';
+  if ($unlimited) {
+    // Keep ends_at within DATETIME range without needing schema changes
+    $ends = new DateTime('9999-12-31 23:59:59');
+  } else {
+    $ends = (new DateTime())->modify("+" . (int)$plan['duration_days'] . " days");
+  }
+$pdo->prepare("INSERT INTO subscriptions (user_id, plan_id, starts_at, ends_at, status)
                  VALUES (?,?,?,?, 'active')")
       ->execute([
         $user_id,
@@ -90,7 +99,7 @@ if (isset($_POST['sub_create'])) {
 $plans = $pdo->query("SELECT * FROM plans ORDER BY created_at DESC")->fetchAll();
 $users = $pdo->query("SELECT id,username FROM users WHERE status='active'")->fetchAll();
 $subs  = $pdo->query("
-  SELECT s.*, u.username, p.name AS plan_name, p.max_streams
+  SELECT s.*, u.username, p.name AS plan_name, p.max_streams, p.max_devices
   FROM subscriptions s
   JOIN users u ON u.id=s.user_id
   JOIN plans p ON p.id=s.plan_id
@@ -133,8 +142,16 @@ $topbar = file_get_contents(__DIR__ . '/topbar.html');
         <input name="duration_days" type="number" value="30">
       </div>
       <div>
-        <label>Device Limit (max streams)</label>
+        <label>Max Streams</label>
         <input name="max_streams" type="number" value="1" min="1">
+      </div>
+      <div>
+        <label>Max Devices</label>
+        <input name="max_devices" type="number" value="2" min="1">
+      </div>
+      <div>
+        <label>Reseller Credits Cost</label>
+        <input name="reseller_credits_cost" type="number" value="1" min="0">
       </div>
     </div>
 
@@ -154,7 +171,7 @@ $topbar = file_get_contents(__DIR__ . '/topbar.html');
       <th>Name</th>
       <th>Price</th>
       <th>Days</th>
-      <th>Device Limit</th>
+      <th>Max Streams</th><th>Max Devices</th><th>Reseller Cost</th>
       <th>Actions</th>
     </tr>
 
@@ -167,9 +184,9 @@ $topbar = file_get_contents(__DIR__ . '/topbar.html');
         <td><input name="name" value="<?=e($p['name'])?>" required></td>
         <td><input name="price" type="number" step="0.01" value="<?=e($p['price'])?>"></td>
         <td><input name="duration_days" type="number" value="<?=e($p['duration_days'])?>" min="1"></td>
-        <td>
-          <input name="max_streams" type="number" value="<?=e($p['max_streams'])?>" min="1">
-        </td>
+        <td><input name="max_streams" type="number" value="<?=e($p['max_streams'])?>" min="1"></td>
+        <td><input name="max_devices" type="number" value="<?=e($p['max_devices'] ?? 2)?>" min="1"></td>
+        <td><input name="reseller_credits_cost" type="number" value="<?=e($p['reseller_credits_cost'] ?? 1)?>" min="0"></td>
 
         <td style="white-space:nowrap;">
           <button type="submit">Save</button>
@@ -205,7 +222,7 @@ $topbar = file_get_contents(__DIR__ . '/topbar.html');
         <label>Plan</label>
         <select name="plan_id">
           <?php foreach($plans as $p): ?>
-          <option value="<?=$p['id']?>"><?=e($p['name'])?> (<?=e($p['max_streams'])?> devices)</option>
+          <option value="<?=$p['id']?>"><?=e($p['name'])?> (<?=e($p['max_streams'])?> streams / <?=e($p['max_devices'] ?? 2)?> devices)</option>
           <?php endforeach; ?>
         </select>
       </div>
@@ -235,7 +252,7 @@ $topbar = file_get_contents(__DIR__ . '/topbar.html');
     <tr>
       <th>User</th>
       <th>Plan</th>
-      <th>Devices</th>
+      <th>Max Streams</th><th>Max Devices</th>
       <th>Starts</th>
       <th>Ends</th>
       <th>Status</th>
@@ -244,9 +261,12 @@ $topbar = file_get_contents(__DIR__ . '/topbar.html');
     <tr>
       <td><?=e($s['username'])?></td>
       <td><?=e($s['plan_name'])?></td>
-      <td><?=e($s['max_streams'])?></td>
+      <td><?=e($s['max_streams'])?></td><td><?=e($s['max_devices'] ?? 2)?></td>
       <td><?=e($s['starts_at'])?></td>
-      <td><?= $s['ends_at'] ? e($s['ends_at']) : 'Unlimited' ?></td>
+      <td><?php
+  $is_unlimited = !$s['ends_at'] || str_starts_with((string)$s['ends_at'], '9999-');
+  echo $is_unlimited ? 'Unlimited' : e($s['ends_at']);
+?></td>
       <td><?=e($s['status'])?></td>
     </tr>
     <?php endforeach; ?>

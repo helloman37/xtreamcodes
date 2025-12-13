@@ -1,6 +1,7 @@
 <?php
 // db.php
 $config = require __DIR__ . '/config.php';
+require_once __DIR__ . '/migration.php';
 
 function db(): PDO {
   static $pdo = null;
@@ -24,6 +25,13 @@ function db(): PDO {
     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
   ]);
+
+  // Best-effort runtime migrations (safe to call multiple times).
+  try {
+    if (function_exists('db_migrate')) db_migrate($pdo);
+  } catch (Throwable $e) {
+    // Don't break the app if the hosting DB user can't ALTER.
+  }
 
   return $pdo;
 }

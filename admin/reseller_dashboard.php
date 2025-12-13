@@ -23,18 +23,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_user'])) {
   $password = (string)($_POST['password'] ?? '');
   $plan_id  = (int)($_POST['plan_id'] ?? 0);
   $allow_adult = !empty($_POST['allow_adult']) ? 1 : 0;
-  $unlimited = !empty($_POST['unlimited']) ? 1 : 0;
+  $unlimited = 0; // resellers cannot create unlimited subs
 
   if ($username === '' || $password === '' || $plan_id <= 0) {
     flash_set("Please fill username, password, and plan.", "error");
     header("Location: reseller_dashboard.php"); exit;
   }
 
-  if ((int)$reseller['credits'] <= 0) {
-    flash_set("Not enough credits to create a user.", "error");
-    header("Location: reseller_dashboard.php"); exit;
-  }
-
+  
   // get plan
   $planStmt = $pdo->prepare("SELECT * FROM plans WHERE id=? LIMIT 1");
   $planStmt->execute([$plan_id]);
@@ -44,10 +40,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_user'])) {
     header("Location: reseller_dashboard.php"); exit;
   }
 
+  $cost = (int)($plan['reseller_credits_cost'] ?? 1);
+  if ($cost < 0) $cost = 0;
+
+  // Reseller hard limits
+  if (!empty($reseller['max_users'])) {
+    $st = $pdo->prepare("SELECT COUNT(*) c FROM users WHERE reseller_id=?");
+    $st->execute([$reseller_id]);
+    $c = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
+    if ($c >= (int)$reseller['max_users']) {
+      flash_set("Reseller limit reached (max users).", "error");
+      header("Location: reseller_dashboard.php"); exit;
+    }
+  }
+  if (!empty($reseller['max_active_users'])) {
+    $st = $pdo->prepare("
+      SELECT COUNT(DISTINCT u.id) c
+      FROM users u
+      JOIN subscriptions s ON s.user_id=u.id AND s.status='active' AND (s.ends_at IS NULL OR s.ends_at>NOW())
+      WHERE u.reseller_id=?
+    ");
+    $st->execute([$reseller_id]);
+    $c = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
+    if ($c >= (int)$reseller['max_active_users']) {
+      flash_set("Reseller limit reached (max active).", "error");
+      header("Location: reseller_dashboard.php"); exit;
+    }
+  }
+
+  // Credits check (unless reseller is unlimited)
+  if (empty($reseller['unlimited'])) {
+    if ((int)$reseller['credits'] < $cost) {
+      flash_set("Not enough credits. Need {$cost}.", "error");
+      header("Location: reseller_dashboard.php"); exit;
+    }
+  }
+
   // compute ends_at
   $starts_at = date("Y-m-d H:i:s");
   $ends_at = null;
   $duration_days = (int)($plan['duration_days'] ?? 0);
+  if (!empty($reseller['max_days_per_sub']) && $duration_days > (int)$reseller['max_days_per_sub']) {
+    $duration_days = (int)$reseller['max_days_per_sub'];
+  }
   if (!$unlimited && $duration_days > 0) {
     $ends_at = date("Y-m-d H:i:s", strtotime("+{$duration_days} days"));
   }
@@ -72,15 +107,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_user'])) {
     $sStmt = $pdo->prepare("INSERT INTO subscriptions (user_id, plan_id, starts_at, ends_at, status) VALUES (?,?,?,?,?)");
     $sStmt->execute([$user_id, $plan_id, $starts_at, $ends_at, 'active']);
 
-    // deduct credit
-    $cStmt = $pdo->prepare("UPDATE resellers SET credits = credits - 1 WHERE id=? AND credits > 0");
-    $cStmt->execute([$reseller_id]);
-    if ($cStmt->rowCount() !== 1) {
-      throw new Exception("Credit deduction failed.");
+    // deduct credits
+    if (empty($reseller['unlimited']) && $cost > 0) {
+      $cStmt = $pdo->prepare("UPDATE resellers SET credits = credits - ? WHERE id=? AND credits >= ?");
+      $cStmt->execute([$cost, $reseller_id, $cost]);
+      if ($cStmt->rowCount() !== 1) {
+        throw new Exception("Credit deduction failed.");
+      }
     }
 
     $pdo->commit();
-    flash_set("User created. 1 credit used.", "success");
+    flash_set("User created. Credits used: ".$cost, "success");
   } catch (Exception $e) {
     $pdo->rollBack();
     flash_set("Create failed: ".$e->getMessage(), "error");

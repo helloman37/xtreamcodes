@@ -28,6 +28,15 @@ return [
   // token expiry in seconds (1 hour default)
   'token_ttl' => 3600,
 
+  // If true, requires the client to send a stable device_id (querystring or X-Device-ID).
+  // Recommended for your Android app; keep false for generic IPTV apps.
+  'strict_device_id' => false,
+
+
+  // Optional: Discord/Telegram/Slack webhook for security/ops alerts
+  // (expects JSON body)
+  'webhook_url' => '',
+
   // device/connection window in seconds
   'device_window' => 120,
 

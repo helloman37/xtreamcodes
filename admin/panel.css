@@ -38,7 +38,9 @@ body{
   position:sticky;
   top:0;
   height:100vh;
-  overflow:auto;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
 }
 .sidebar .sidebar-brand{
   display:flex; align-items:center; gap:10px;
@@ -65,7 +67,31 @@ body{
 .sidebar-user .role{
   font-size:12px; letter-spacing:.18em; font-weight:800; color:#e2e8f0;
 }
-.side-nav{display:flex; flex-direction:column; gap:4px; padding:0 6px;}
+
+/* Sidebar groups (accordion) */
+.nav-group{margin:0; padding:0;}
+.nav-group-summary{
+  list-style:none;
+  display:flex; align-items:center; gap:10px;
+  padding:10px 12px;
+  border-radius:10px;
+  color:#cbd5e1;
+  cursor:pointer;
+  user-select:none;
+  font-weight:700;
+  font-size:13px;
+  text-transform:uppercase;
+  letter-spacing:.04em;
+  opacity:.92;
+}
+.nav-group-summary::-webkit-details-marker{display:none;}
+.nav-group-summary:hover{background:rgba(255,255,255,.06);}
+.nav-group .chev{margin-left:auto; opacity:.85; transform:rotate(0deg); transition:transform .15s ease;}
+.nav-group[open] .chev{transform:rotate(90deg);}
+.nav-sub{display:flex; flex-direction:column; gap:4px; padding:4px 0 10px 18px;}
+.nav-sub .nav-item{padding:9px 12px;}
+
+.side-nav{display:flex; flex-direction:column; gap:6px; padding:0 8px 12px; flex:1; overflow:auto;}
 .side-nav .nav-item{
   display:flex; align-items:center; gap:10px;
   padding:10px 12px; border-radius:10px; color:#cbd5e1;

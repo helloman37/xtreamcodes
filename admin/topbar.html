@@ -10,17 +10,83 @@
       <div class="role">ADMIN</div>
     </div>
 
-    <nav class="side-nav">
-      <a class="nav-item" href="dashboard.php"><span class="icon">🏠</span><span>Dashboard</span></a>
-      <a class="nav-item" href="channels_manager.php"><span class="icon">📺</span><span>Contents</span></a>
-      <a class="nav-item" href="upload_m3u.php"><span class="icon">⬆️</span><span>Import M3U</span></a>
-      <a class="nav-item" href="checker.php"><span class="icon">✅</span><span>Checker</span></a>
-      <a class="nav-item" href="epg_manager.php"><span class="icon">🗓️</span><span>EPG</span></a>
-      <a class="nav-item" href="user_accounts.php"><span class="icon">👥</span><span>Clients</span></a>
-      <a class="nav-item" href="plans_subs.php"><span class="icon">💳</span><span>Plans / Subs</span></a>
-      <a class="nav-item" href="resellers.php"><span class="icon">🧑‍💼</span><span>Resellers</span></a>
-      <a class="nav-item" href="signout.php"><span class="icon">🚪</span><span>Logout</span></a>
+    <nav class="side-nav" id="sideNav">
+      <details class="nav-group" data-group="overview" open>
+        <summary class="nav-group-summary"><span class="icon">🧭</span><span>Overview</span><span class="chev">▸</span></summary>
+        <div class="nav-sub">
+          <a class="nav-item" href="dashboard.php"><span class="icon">🏠</span><span>Dashboard</span></a>
+        </div>
+      </details>
+
+      <details class="nav-group" data-group="content">
+        <summary class="nav-group-summary"><span class="icon">📺</span><span>Content</span><span class="chev">▸</span></summary>
+        <div class="nav-sub">
+          <a class="nav-item" href="channels_manager.php"><span class="icon">📺</span><span>Contents</span></a>
+          <a class="nav-item" href="vod_manager.php"><span class="icon">🎬</span><span>VOD</span></a>
+          <a class="nav-item" href="series_manager.php"><span class="icon">📺</span><span>Series</span></a>
+          <a class="nav-item" href="upload_m3u.php"><span class="icon">⬆️</span><span>Import M3U</span></a>
+          <a class="nav-item" href="checker.php"><span class="icon">✅</span><span>Checker</span></a>
+        </div>
+      </details>
+
+      <details class="nav-group" data-group="epg">
+        <summary class="nav-group-summary"><span class="icon">🗓️</span><span>EPG</span><span class="chev">▸</span></summary>
+        <div class="nav-sub">
+          <a class="nav-item" href="epg_manager.php"><span class="icon">🗓️</span><span>Sources</span></a>
+          <a class="nav-item" href="epg_import.php"><span class="icon">⏬</span><span>Import / Run</span></a>
+        </div>
+      </details>
+
+      <details class="nav-group" data-group="users">
+        <summary class="nav-group-summary"><span class="icon">👥</span><span>Users</span><span class="chev">▸</span></summary>
+        <div class="nav-sub">
+          <a class="nav-item" href="user_accounts.php"><span class="icon">👥</span><span>Clients</span></a>
+          <a class="nav-item" href="packages.php"><span class="icon">📦</span><span>Packages</span></a>
+          <a class="nav-item" href="resellers.php"><span class="icon">🧑‍💼</span><span>Resellers</span></a>
+        </div>
+      </details>
+
+      <details class="nav-group" data-group="billing">
+        <summary class="nav-group-summary"><span class="icon">💳</span><span>Billing</span><span class="chev">▸</span></summary>
+        <div class="nav-sub">
+          <a class="nav-item" href="plans_subs.php"><span class="icon">💳</span><span>Plans / Subs</span></a>
+        </div>
+      </details>
+
+      <details class="nav-group" data-group="system">
+        <summary class="nav-group-summary"><span class="icon">⚙️</span><span>System</span><span class="chev">▸</span></summary>
+        <div class="nav-sub">
+          <a class="nav-item" href="sessions.php"><span class="icon">📡</span><span>Sessions</span></a>
+          <a class="nav-item" href="stream_probe.php"><span class="icon">🧪</span><span>Stream Probe</span></a>
+          <a class="nav-item" href="health.php"><span class="icon">❤️</span><span>Health</span></a>
+          <a class="nav-item" href="audit_logs.php"><span class="icon">🧾</span><span>Audit Logs</span></a>
+          <a class="nav-item" href="bulk_delete.php"><span class="icon">🧨</span><span>Bulk Delete</span></a>
+          <a class="nav-item" href="signout.php"><span class="icon">🚪</span><span>Logout</span></a>
+        </div>
+      </details>
     </nav>
+
+    <script>
+      (function(){
+        // highlight active item + open its group
+        var path = (window.location.pathname || '').split('/').pop() || '';
+        var nav = document.getElementById('sideNav');
+        if(!nav) return;
+        var links = nav.querySelectorAll('a.nav-item[href]');
+        var active = null;
+        links.forEach(function(a){
+          var href = (a.getAttribute('href') || '').split('/').pop();
+          if(href && href === path){
+            active = a;
+          }
+        });
+        if(active){
+          active.classList.add('active');
+          var grp = active.closest('details.nav-group');
+          if(grp) grp.open = true;
+        }
+      })();
+    </script>
   </aside>
 
   <main class="main">
