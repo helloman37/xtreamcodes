@@ -14,14 +14,11 @@ Pure PHP + MySQL IPTV panel + a companion Android app. No frameworks. No Compose
 
 The Android TV / Android phone app is **released for download**.
 
-- **Download APK (latest):** *(add your direct link here — GitHub Releases recommended)*
-- **Changelog / versions:** *(optional)*
-
-I’ve put a lot into this project. I may release the APK publicly but **keep full app source private**.
+I’ve put a lot into this project. While I released the APK publicly I will **keep full app source private**.
 
 ---
 
-## What’s New / What We Changed
+## What’s New 
 
 This repo has been upgraded heavily versus the early “basic panel” version:
 
