@@ -140,6 +140,9 @@ $my_users->execute([$reseller_id]);
 $my_users = $my_users->fetchAll(PDO::FETCH_ASSOC);
 
 $topbar = file_get_contents(__DIR__ . '/reseller_topbar.html');
+$_credits = (int)($reseller['credits'] ?? 0);
+$topbar = str_replace('{{CREDITS}}', (string)$_credits, $topbar);
+if ($_credits <= 0) { $topbar = str_replace('dot-green', 'dot-red', $topbar); }
 ?>
 <!doctype html>
 <html>
