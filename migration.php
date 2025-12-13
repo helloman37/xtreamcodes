@@ -170,6 +170,16 @@ function db_migrate(PDO $pdo): void {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   ");
 
+  // System settings key/value store (used for failover videos, etc.)
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS system_settings (
+      setting_key VARCHAR(190) PRIMARY KEY,
+      setting_value TEXT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  ");
+
+
 
   $pdo->exec("
     CREATE TABLE IF NOT EXISTS epg_programs (

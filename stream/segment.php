@@ -1,6 +1,28 @@
 <?php
 require_once __DIR__ . '/../api_common.php';
 
+// -----------------------------------------------------------------------------
+// Segment requests are usually .ts bytes. Redirecting to arbitrary media types can
+// break some players, so we only redirect here when the configured fail video
+// ends with .ts (best compatibility).
+// -----------------------------------------------------------------------------
+function _seg_fail_video_url(PDO $pdo, string $type, string $reason): string {
+  $kind = ($type === 'live') ? 'live' : 'vod';
+  $primary = (string)system_setting_get($pdo, "fail_video_{$kind}_{$reason}", '');
+  if ($primary !== '') return $primary;
+  $other = ($kind === 'live') ? 'vod' : 'live';
+  return (string)system_setting_get($pdo, "fail_video_{$other}_{$reason}", '');
+}
+function _seg_try_redirect_ts(string $url): void {
+  if ($url === '') return;
+  if (!preg_match('/\.ts(\?|$)/i', $url)) return;
+  http_response_code(302);
+  header('Cache-Control: no-store, no-cache, must-revalidate');
+  header('Pragma: no-cache');
+  header('Location: ' . $url);
+  exit;
+}
+
 $u  = (string)($_GET['u'] ?? '');
 $p  = (string)($_GET['p'] ?? '');
 $id = (int)($_GET['id'] ?? 0);
@@ -22,6 +44,8 @@ $ip = get_client_ip();
 $ban = abuse_ban_lookup($pdo, $ip, null);
 if ($ban) {
   audit_log('ban_block', null, ['ban_type'=>'ip','ip'=>$ip]);
+  $fv = _seg_fail_video_url($pdo, $type, 'banned');
+  _seg_try_redirect_ts($fv);
   http_response_code(403);
   exit('Banned');
 }
@@ -37,17 +61,27 @@ if ($device_fp==='' && strict_device_id_enabled()) { http_response_code(403); ex
 $st = $pdo->prepare("SELECT * FROM users WHERE username=? AND status='active' LIMIT 1");
 $st->execute([$u]);
 $user = $st->fetch(PDO::FETCH_ASSOC);
-if (!$user) { http_response_code(401); exit("Invalid user"); }
+if (!$user) {
+  $fv = _seg_fail_video_url($pdo, $type, 'invalid_login');
+  _seg_try_redirect_ts($fv);
+  http_response_code(401);
+  exit("Invalid user");
+}
 
 /* token OR password */
 $token_ok = ($token && $exp && verify_token($u, $id, $exp, $token, $type));
 $pass_ok  = ($p !== '' && password_verify($p, $user['password_hash']));
 if (!$token_ok && !$pass_ok) {
-  http_response_code(401); exit("Invalid credentials");
+  $fv = _seg_fail_video_url($pdo, $type, 'invalid_login');
+  _seg_try_redirect_ts($fv);
+  http_response_code(401);
+  exit("Invalid credentials");
 }
 
 // Policy: IP allow/deny
 if (!ip_allowed($ip, $user['ip_allowlist'] ?? null, $user['ip_denylist'] ?? null)) {
+  $fv = _seg_fail_video_url($pdo, $type, 'banned');
+  _seg_try_redirect_ts($fv);
   http_response_code(403);
   exit("IP not allowed");
 }
@@ -100,7 +134,12 @@ $st = $pdo->prepare("
 ");
 $st->execute([(int)$user['id']]);
 $sub = $st->fetch(PDO::FETCH_ASSOC);
-if (!$sub) { http_response_code(403); exit("No active subscription"); }
+if (!$sub) {
+  $fv = _seg_fail_video_url($pdo, $type, 'expired');
+  _seg_try_redirect_ts($fv);
+  http_response_code(403);
+  exit("No active subscription");
+}
 
 /* Require an active recent session for this stream (anti-hotlink) */
 $config = require __DIR__ . '/../config.php';

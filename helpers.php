@@ -455,3 +455,34 @@ if (!function_exists('reseller_auth')) {
   }
 }
 
+
+
+/* ---------- SYSTEM SETTINGS (key/value) ---------- */
+
+function system_setting_get(PDO $pdo, string $key, ?string $default = null): ?string {
+  try {
+    $st = $pdo->prepare("SELECT setting_value FROM system_settings WHERE setting_key=? LIMIT 1");
+    $st->execute([$key]);
+    $val = $st->fetchColumn();
+    if ($val === false || $val === null) return $default;
+    return (string)$val;
+  } catch (Throwable $e) {
+    return $default;
+  }
+}
+
+function system_setting_set(PDO $pdo, string $key, ?string $value): void {
+  try {
+    if ($value === null || $value === '') {
+      $pdo->prepare("DELETE FROM system_settings WHERE setting_key=?")->execute([$key]);
+      return;
+    }
+    $pdo->prepare("
+      INSERT INTO system_settings (setting_key, setting_value)
+      VALUES (?,?)
+      ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)
+    ")->execute([$key, $value]);
+  } catch (Throwable $e) {
+    // ignore
+  }
+}

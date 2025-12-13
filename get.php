@@ -23,6 +23,29 @@ $link_type = strtolower($_GET['link'] ?? 'token_protected');
 telemetry_init('get', $type);
 telemetry_meta(['link'=>$link_type]);
 
+// -----------------------------------------------------------------------------
+// Optional fail-video redirect (System -> Fail Videos).
+// For get.php, we only redirect on non-config requests, since config expects JSON.
+// Kind mapping: m3u_plus => vod, otherwise live.
+// -----------------------------------------------------------------------------
+function _get_fail_kind(string $type): string {
+  return ($type === 'm3u_plus') ? 'vod' : 'live';
+}
+function _get_fail_video_url(PDO $pdo, string $kind, string $reason): string {
+  // Prefer exact kind, but fall back to the other kind if not set.
+  $primary = (string)system_setting_get($pdo, "fail_video_{$kind}_{$reason}", '');
+  if ($primary !== '') return $primary;
+  $other = ($kind === 'live') ? 'vod' : 'live';
+  return (string)system_setting_get($pdo, "fail_video_{$other}_{$reason}", '');
+}
+function _get_redirect_fail_video(string $url): void {
+  http_response_code(302);
+  header('Cache-Control: no-store, no-cache, must-revalidate');
+  header('Pragma: no-cache');
+  header('Location: ' . $url);
+  exit;
+}
+
 if ($username === '' || $password === '') {
   telemetry_reason('missing_credentials');
   http_response_code(400);
@@ -40,6 +63,12 @@ $user = $st->fetch(PDO::FETCH_ASSOC);
 
 if (!$user || !password_verify($password, $user['password_hash'])) {
   telemetry_reason('auth_fail', ['username'=>$username]);
+  // If configured, redirect to a custom fail video instead of returning text.
+  if ($type !== 'config') {
+    $kind = _get_fail_kind($type);
+    $fv = _get_fail_video_url($pdo, $kind, 'invalid_login');
+    if ($fv !== '') _get_redirect_fail_video($fv);
+  }
   http_response_code(401);
   echo "Invalid credentials";
   exit;
@@ -53,6 +82,11 @@ $ban = abuse_ban_lookup($pdo, $ip, (int)$user['id']);
 if ($ban) {
   audit_log('ban_block', (int)$user['id'], ['ban_type'=>$ban['ban_type'] ?? 'user','ip'=>$ip]);
   telemetry_reason('banned');
+  if ($type !== 'config') {
+    $kind = _get_fail_kind($type);
+    $fv = _get_fail_video_url($pdo, $kind, 'banned');
+    if ($fv !== '') _get_redirect_fail_video($fv);
+  }
   http_response_code(403);
   echo "Banned";
   exit;
@@ -60,6 +94,11 @@ if ($ban) {
 
 if (!ip_allowed($ip, $user['ip_allowlist'] ?? null, $user['ip_denylist'] ?? null)) {
   telemetry_reason('ip_not_allowed');
+  if ($type !== 'config') {
+    $kind = _get_fail_kind($type);
+    $fv = _get_fail_video_url($pdo, $kind, 'banned');
+    if ($fv !== '') _get_redirect_fail_video($fv);
+  }
   http_response_code(403);
   echo "IP not allowed";
   exit;
@@ -78,6 +117,11 @@ $sub = $st->fetch(PDO::FETCH_ASSOC);
 
 if (!$sub) {
   telemetry_reason('no_subscription');
+  if ($type !== 'config') {
+    $kind = _get_fail_kind($type);
+    $fv = _get_fail_video_url($pdo, $kind, 'expired');
+    if ($fv !== '') _get_redirect_fail_video($fv);
+  }
   http_response_code(403);
   echo "No active subscription";
   exit;

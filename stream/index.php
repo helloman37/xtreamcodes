@@ -6,6 +6,29 @@ $base_url = rtrim($config['base_url'], '/');
 
 header("Access-Control-Allow-Origin: *");
 
+// -----------------------------------------------------------------------------
+// Optional "fail video" redirects: if configured in admin, redirect failed
+// stream attempts to a custom video URL instead of returning a text/JSON error.
+// Keys: fail_video_{live|vod}_{invalid_login|expired|banned|limit}
+// -----------------------------------------------------------------------------
+function _fail_video_url(PDO $pdo, string $type, string $reason): string {
+  // Prefer the matching kind (live vs vod), but if it's not set, fall back to the other kind.
+  // This prevents misconfiguration (e.g. only VOD set) from disabling redirects.
+  $kind = ($type === 'live') ? 'live' : 'vod';
+  $primary = (string)system_setting_get($pdo, "fail_video_{$kind}_{$reason}", '');
+  if ($primary !== '') return $primary;
+  $other = ($kind === 'live') ? 'vod' : 'live';
+  return (string)system_setting_get($pdo, "fail_video_{$other}_{$reason}", '');
+}
+function _redirect_fail_video(string $url): void {
+  http_response_code(302);
+  header('Cache-Control: no-store, no-cache, must-revalidate');
+  header('Pragma: no-cache');
+  header('Location: ' . $url);
+  exit;
+}
+
+
 $u  = (string)($_GET['u'] ?? '');
 $p  = (string)($_GET['p'] ?? '');
 $id = (int)($_GET['id'] ?? 0);
@@ -31,6 +54,8 @@ $ban = abuse_ban_lookup($pdo, $ip, null);
 if ($ban) {
   audit_log('ban_block', null, ['ban_type'=>'ip','ip'=>$ip]);
   telemetry_reason('banned_ip');
+  $url = _fail_video_url($pdo, $type, 'banned');
+  if ($url !== '') _redirect_fail_video($url);
   http_response_code(403);
   exit('Banned');
 }
@@ -54,6 +79,8 @@ $st->execute([$u]);
 $user = $st->fetch(PDO::FETCH_ASSOC);
 if (!$user) {
   telemetry_reason('user_not_found', ['username'=>$u]);
+  $url = _fail_video_url($pdo, $type, 'invalid_login');
+  if ($url !== '') _redirect_fail_video($url);
   http_response_code(401);
   exit("Invalid user");
 }
@@ -66,6 +93,8 @@ $pass_ok  = ($p !== '' && password_verify($p, $user['password_hash']));
 if (!$token_ok && !$pass_ok) {
   audit_log('stream_auth_fail', (int)$user['id'], ['channel_id'=>$id]);
   telemetry_reason('auth_fail', ['id'=>$id]);
+  $url = _fail_video_url($pdo, $type, 'invalid_login');
+  if ($url !== '') _redirect_fail_video($url);
   http_response_code(401);
   exit("Invalid credentials");
 }
@@ -74,6 +103,8 @@ if (!$token_ok && !$pass_ok) {
 if (!ip_allowed($ip, $user['ip_allowlist'] ?? null, $user['ip_denylist'] ?? null)) {
   audit_log('ip_block', (int)$user['id'], ['ip'=>$ip,'channel_id'=>$id]);
   telemetry_reason('ip_not_allowed', ['ip'=>$ip,'id'=>$id]);
+  $url = _fail_video_url($pdo, $type, 'banned');
+  if ($url !== '') _redirect_fail_video($url);
   http_response_code(403);
   exit("IP not allowed");
 }
@@ -90,6 +121,8 @@ $st->execute([(int)$user['id']]);
 $sub = $st->fetch(PDO::FETCH_ASSOC);
 if (!$sub) {
   telemetry_reason('no_subscription');
+  $url = _fail_video_url($pdo, $type, 'expired');
+  if ($url !== '') _redirect_fail_video($url);
   http_response_code(403);
   exit("No active subscription");
 }
@@ -113,6 +146,8 @@ try {
     if ($primary && $device_fp!=='' && !hash_equals($primary, $device_fp)) {
       audit_log('device_lock_block', (int)$user['id'], ['ip'=>$ip,'channel_id'=>$id]);
       telemetry_reason('device_lock');
+      $url = _fail_video_url($pdo, $type, 'limit');
+      if ($url !== '') _redirect_fail_video($url);
       http_response_code(403);
       exit("Device locked");
     }
@@ -237,6 +272,8 @@ $active_devices = (int)($st->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
 if ($max_devices > 0 && ($active_devices + $need_device) > $max_devices) {
   audit_log('max_devices', (int)$user['id'], ['active'=>$active_devices,'max'=>$max_devices]);
   telemetry_reason('max_devices', ['active'=>$active_devices,'max'=>$max_devices]);
+  $url = _fail_video_url($pdo, $type, 'limit');
+  if ($url !== '') _redirect_fail_video($url);
   http_response_code(403);
   exit('max_devices_reached');
 }
@@ -245,6 +282,8 @@ if ($max_devices > 0 && ($active_devices + $need_device) > $max_devices) {
 if ($max_streams > 0 && ($active_streams + $need_stream) > $max_streams) {
   audit_log('max_connections', (int)$user['id'], ['channel_id'=>$id,'active'=>$active_streams,'max'=>$max_streams]);
   telemetry_reason('max_connections', ['active'=>$active_streams,'max'=>$max_streams,'id'=>$id]);
+  $url = _fail_video_url($pdo, $type, 'limit');
+  if ($url !== '') _redirect_fail_video($url);
   http_response_code(429);
   header("Content-Type: application/json; charset=utf-8");
   echo json_encode(["error"=>"max_connections_reached","active"=>$active_streams,"max"=>$max_streams]);
